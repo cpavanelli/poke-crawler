@@ -5,11 +5,9 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from models.card import Card
-from models.price_result import PriceResult
+from models.listing import Listing
 from parsers.base import MarketplaceParser
 from parsers.sprite_decoder import (
     SpriteDecodeError,
@@ -18,17 +16,8 @@ from parsers.sprite_decoder import (
 )
 
 
-@dataclass(slots=True, frozen=True)
-class SpriteDecodeContext:
-    """Context passed to the optional sprite decode error callback."""
-
-    card: Card
-    url: str
-    error_message: str
-
-
 SpriteFetcher = Callable[[str], bytes]
-SpriteErrorHandler = Callable[[SpriteDecodeContext], None]
+SpriteErrorHandler = Callable[[str], None]
 
 
 class LigaPokemonParser(MarketplaceParser):
@@ -51,8 +40,8 @@ class LigaPokemonParser(MarketplaceParser):
             and (hostname == "ligapokemon.com.br" or hostname.endswith(".ligapokemon.com.br"))
         )
 
-    def parse(self, html: str, card: Card) -> list[PriceResult]:
-        """Parse the page HTML and return the lowest listing per configured condition."""
+    def parse_listings(self, html: str) -> list[Listing]:
+        """Parse the page HTML and return every priced listing."""
         cards_stock = _extract_js_literal(html, "cards_stock")
         if not isinstance(cards_stock, list):
             raise ValueError("LigaPokemon cards_stock must be a JSON array")
@@ -63,14 +52,13 @@ class LigaPokemonParser(MarketplaceParser):
         condition_map = _build_condition_map(data_quality)
         style_css = _extract_inline_style(html)
 
-        lowest_by_condition: dict[str, float] = {}
-        configured_conditions = set(card.conditions)
+        listings: list[Listing] = []
         sprite_decoder: SpriteDecoder | None = None
         sprite_setup_done = False
         sprite_error_reported = False
 
-        def report_sprite_error(error: SpriteDecodeError) -> None:
-            # At most one sprite warning per card per scan: a page-level fault or
+        def report_sprite_error(message: str) -> None:
+            # At most one sprite warning per page: a page-level fault or
             # a site-wide decoder breakage otherwise fans the same error out
             # across every precoCss listing (FRD §10 is per-listing, but the
             # operator only needs one alert per product).
@@ -78,14 +66,14 @@ class LigaPokemonParser(MarketplaceParser):
             if sprite_error_reported:
                 return
             sprite_error_reported = True
-            self._emit_sprite_error(card, error)
+            self._emit_sprite_error(message)
 
         for listing in cards_stock:
             if not isinstance(listing, dict):
                 continue
 
             condition = _resolve_condition(listing, condition_map)
-            if condition is None or condition not in configured_conditions:
+            if condition is None:
                 continue
 
             price = _parse_preco_final(listing)
@@ -107,7 +95,7 @@ class LigaPokemonParser(MarketplaceParser):
                         sprite_bytes = self._sprite_fetcher(style.sprite_url)
                         sprite_decoder = SpriteDecoder(style.position_map, sprite_bytes)
                     except SpriteDecodeError as exc:
-                        report_sprite_error(exc)
+                        report_sprite_error(str(exc))
 
                 if sprite_decoder is None:
                     continue
@@ -115,28 +103,19 @@ class LigaPokemonParser(MarketplaceParser):
                 try:
                     price = sprite_decoder.decode(raw_preco_css)
                 except SpriteDecodeError as exc:
-                    report_sprite_error(exc)
+                    report_sprite_error(str(exc))
                     continue
 
-            current = lowest_by_condition.get(condition)
-            if current is None or price < current:
-                lowest_by_condition[condition] = price
+            listings.append(Listing(condition=condition, price=price))
 
-        ordered_conditions = dict.fromkeys(card.conditions)
-        return [
-            PriceResult(condition=condition, lowest_price=lowest_by_condition[condition])
-            for condition in ordered_conditions
-            if condition in lowest_by_condition
-        ]
+        return listings
 
-    def _emit_sprite_error(self, card: Card, error: SpriteDecodeError) -> None:
+    def _emit_sprite_error(self, message: str) -> None:
         """Forward a sprite decode error to the optional callback."""
         if self._on_sprite_error is None:
             return
 
-        self._on_sprite_error(
-            SpriteDecodeContext(card=card, url=card.url, error_message=str(error))
-        )
+        self._on_sprite_error(message)
 
 
 def _extract_js_literal(html: str, name: str) -> object:

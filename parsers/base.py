@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from models.card import Card
-from models.price_result import PriceResult
+from models.listing import Listing
 
 
 class MarketplaceParser(ABC):
@@ -16,5 +15,5 @@ class MarketplaceParser(ABC):
         """Return whether this parser can handle the supplied URL."""
 
     @abstractmethod
-    def parse(self, html: str, card: Card) -> list[PriceResult]:
-        """Parse one marketplace page and return the usable price results."""
+    def parse_listings(self, html: str) -> list[Listing]:
+        """Return every listing on the page (all conditions, unfiltered)."""

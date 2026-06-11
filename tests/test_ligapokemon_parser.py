@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from io import BytesIO
 from pathlib import Path
 
@@ -9,8 +10,9 @@ import httpx
 import pytest
 from PIL import Image
 
-from models.card import Card
-from parsers.ligapokemon_parser import LigaPokemonParser, SpriteDecodeContext
+from models.listing import Listing
+from parsers.ligapokemon_parser import LigaPokemonParser
+from services.pricing import lowest_prices
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ligapokemon"
@@ -45,24 +47,30 @@ def test_can_handle_ligapokemon_urls() -> None:
     assert not parser.can_handle("https://example.com/?view=cards/card")
 
 
-def test_parse_fixture_returns_expected_lowest_prices() -> None:
+def test_parse_listings_fixture_returns_every_priced_listing_unfiltered() -> None:
     parser = LigaPokemonParser()
-    card = Card(
-        name="Mega Gengar",
-        conditions=("NM", "SP"),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Gengar+ex%20(284/217)&show=1&ed=ASC&num=284",
+
+    listings = parser.parse_listings(_load_fixture(GENGAR_FIXTURE_PATH))
+
+    assert len(listings) == 25
+    assert Counter(listing.condition for listing in listings) == Counter(
+        {"M": 1, "NM": 17, "SP": 7}
     )
-
-    results = parser.parse(_load_fixture(GENGAR_FIXTURE_PATH), card)
-    assert [(result.condition, result.lowest_price) for result in results] == [
-        ("NM", 2670.0),
-        ("SP", 2350.0),
-    ]
+    assert min(listing.price for listing in listings if listing.condition == "M") == 2687.04
+    assert min(listing.price for listing in listings if listing.condition == "NM") == 2670.0
+    assert min(listing.price for listing in listings if listing.condition == "SP") == 2350.0
 
 
-def test_parse_skips_preco_css_only_listing() -> None:
+def test_parse_listings_includes_conditions_not_requested_by_old_parser() -> None:
     parser = LigaPokemonParser()
-    card = Card(name="Test Card", conditions=("NM",), url="https://www.ligapokemon.com.br/?x=1")
+
+    listings = parser.parse_listings(_load_fixture(GENGAR_FIXTURE_PATH))
+
+    assert any(listing.condition == "M" for listing in listings)
+
+
+def test_parse_listings_skips_preco_css_only_listing_without_fetcher() -> None:
+    parser = LigaPokemonParser()
     html = """
         <html>
             <script>
@@ -73,21 +81,10 @@ def test_parse_skips_preco_css_only_listing() -> None:
         </html>
     """
 
-    assert parser.parse(html, card) == []
+    assert parser.parse_listings(html) == []
 
 
-def test_parse_omits_conditions_without_listings() -> None:
-    parser = LigaPokemonParser()
-    card = Card(
-        name="Mega Gengar",
-        conditions=("HP",),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Gengar+ex%20(284/217)&show=1&ed=ASC&num=284",
-    )
-
-    assert parser.parse(_load_fixture(GENGAR_FIXTURE_PATH), card) == []
-
-
-def test_parse_fixture_uses_sprite_decode_when_fetcher_is_configured() -> None:
+def test_parse_listings_uses_sprite_decode_when_fetcher_is_configured() -> None:
     sprite_bytes = GRENINJA_SPRITE_PATH.read_bytes()
     fetch_calls: list[str] = []
 
@@ -96,22 +93,16 @@ def test_parse_fixture_uses_sprite_decode_when_fetcher_is_configured() -> None:
         return sprite_bytes
 
     parser = LigaPokemonParser(sprite_fetcher=sprite_fetcher)
-    card = Card(
-        name="Mega Greninja",
-        conditions=("NM",),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Greninja+ex%20(116/086)&show=1&ed=CRI&num=116",
-    )
 
-    results = parser.parse(_load_fixture(GRENINJA_FIXTURE_PATH), card)
+    listings = parser.parse_listings(_load_fixture(GRENINJA_FIXTURE_PATH))
 
-    assert [(result.condition, result.lowest_price) for result in results] == [("NM", 843.0)]
-    assert results[0].lowest_price < 934.15
+    assert Listing(condition="NM", price=843.0) in listings
     assert fetch_calls == [
         "https://repositorio.sbrauble.com/arquivos/up/comp/imgnum/files/img/260422lT92f3zskqjd04i6zfa6z2q78n23hf.jpg"
     ]
 
 
-def test_parse_opens_sprite_once_for_many_preco_css_listings(monkeypatch) -> None:
+def test_parse_listings_opens_sprite_once_for_many_preco_css_listings(monkeypatch) -> None:
     import parsers.sprite_decoder as sprite_decoder
 
     open_calls = 0
@@ -126,53 +117,61 @@ def test_parse_opens_sprite_once_for_many_preco_css_listings(monkeypatch) -> Non
 
     sprite_bytes = GRENINJA_SPRITE_PATH.read_bytes()
     parser = LigaPokemonParser(sprite_fetcher=lambda _url: sprite_bytes)
-    card = Card(
-        name="Mega Greninja",
-        conditions=("NM",),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Greninja+ex%20(116/086)&show=1&ed=CRI&num=116",
-    )
 
-    results = parser.parse(_load_fixture(GRENINJA_FIXTURE_PATH), card)
+    listings = parser.parse_listings(_load_fixture(GRENINJA_FIXTURE_PATH))
 
-    # The fixture has 16 precoCss listings, but the sprite is decoded only once.
-    assert [(result.condition, result.lowest_price) for result in results] == [("NM", 843.0)]
+    assert Listing(condition="NM", price=843.0) in listings
     assert open_calls == 1
 
 
-def test_parse_fixture_without_sprite_fetcher_skips_preco_css() -> None:
+def test_parse_listings_without_sprite_fetcher_skips_preco_css() -> None:
     parser = LigaPokemonParser()
-    card = Card(
-        name="Mega Greninja",
-        conditions=("NM",),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Greninja+ex%20(116/086)&show=1&ed=CRI&num=116",
+
+    listings = parser.parse_listings(_load_fixture(GRENINJA_FIXTURE_PATH))
+
+    assert min(listing.price for listing in listings if listing.condition == "NM") == 934.15
+    assert Listing(condition="NM", price=843.0) not in listings
+
+
+def test_parse_listings_composes_with_lowest_prices_for_old_behavior() -> None:
+    parser = LigaPokemonParser()
+
+    results = lowest_prices(
+        parser.parse_listings(_load_fixture(GENGAR_FIXTURE_PATH)), ("NM", "SP")
     )
 
-    results = parser.parse(_load_fixture(GRENINJA_FIXTURE_PATH), card)
+    assert [(result.condition, result.lowest_price) for result in results] == [
+        ("NM", 2670.0),
+        ("SP", 2350.0),
+    ]
 
-    assert [(result.condition, result.lowest_price) for result in results] == [("NM", 934.15)]
+
+def test_parse_listings_with_sprite_composes_with_lowest_prices() -> None:
+    sprite_bytes = GRENINJA_SPRITE_PATH.read_bytes()
+    parser = LigaPokemonParser(sprite_fetcher=lambda _url: sprite_bytes)
+
+    results = lowest_prices(
+        parser.parse_listings(_load_fixture(GRENINJA_FIXTURE_PATH)), ("NM",)
+    )
+
+    assert [(result.condition, result.lowest_price) for result in results] == [("NM", 843.0)]
+    assert results[0].lowest_price < 934.15
 
 
-def test_parse_isolates_and_warns_once_for_sprite_decode_failures() -> None:
+def test_parse_listings_isolates_and_warns_once_for_sprite_decode_failures() -> None:
     blank_sprite_bytes = _load_blank_sprite_bytes()
     sprite_fetch_calls = 0
-    error_contexts: list[SpriteDecodeContext] = []
+    error_messages: list[str] = []
 
     def sprite_fetcher(url: str) -> bytes:
         nonlocal sprite_fetch_calls
         sprite_fetch_calls += 1
         return blank_sprite_bytes
 
-    def on_sprite_error(context: SpriteDecodeContext) -> None:
-        error_contexts.append(context)
-
-    parser = LigaPokemonParser(sprite_fetcher=sprite_fetcher, on_sprite_error=on_sprite_error)
-    card = Card(
-        name="Broken Sprite Card",
-        conditions=("NM",),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Broken+Sprite+Card&show=1",
+    parser = LigaPokemonParser(
+        sprite_fetcher=sprite_fetcher,
+        on_sprite_error=error_messages.append,
     )
-    # Two precoCss listings both fail to decode against the blank sprite, but the
-    # operator should be warned only once per product.
     html = """
         <html>
             <script>
@@ -191,31 +190,22 @@ def test_parse_isolates_and_warns_once_for_sprite_decode_failures() -> None:
         </html>
     """
 
-    results = parser.parse(html, card)
+    listings = parser.parse_listings(html)
 
-    assert [(result.condition, result.lowest_price) for result in results] == [("NM", 934.15)]
+    assert listings == [Listing(condition="NM", price=934.15)]
     assert sprite_fetch_calls == 1
-    assert len(error_contexts) == 1
-    assert error_contexts[0] == SpriteDecodeContext(
-        card=card,
-        url=card.url,
-        error_message="Sprite digit crop did not match a known template",
-    )
+    assert error_messages == ["Sprite digit crop did not match a known template"]
 
 
-def test_parse_propagates_sprite_fetch_errors() -> None:
+@pytest.mark.parametrize("status_code", [403, 429])
+def test_parse_listings_propagates_sprite_fetch_errors(status_code: int) -> None:
     request = httpx.Request("GET", "https://example.com/sprite.jpg")
-    response = httpx.Response(429, request=request)
+    response = httpx.Response(status_code, request=request)
 
     def sprite_fetcher(url: str) -> bytes:
-        raise httpx.HTTPStatusError("Too Many Requests", request=request, response=response)
+        raise httpx.HTTPStatusError("Sprite fetch failed", request=request, response=response)
 
     parser = LigaPokemonParser(sprite_fetcher=sprite_fetcher)
-    card = Card(
-        name="Rate Limited Card",
-        conditions=("NM",),
-        url="https://www.ligapokemon.com.br/?view=cards/card&card=Rate+Limited+Card&show=1",
-    )
     html = """
         <html>
             <script>
@@ -230,4 +220,4 @@ def test_parse_propagates_sprite_fetch_errors() -> None:
     """
 
     with pytest.raises(httpx.HTTPStatusError):
-        parser.parse(html, card)
+        parser.parse_listings(html)

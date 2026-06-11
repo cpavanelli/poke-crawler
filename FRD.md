@@ -148,6 +148,10 @@ For each configured card:
 9. Update baseline.
 10. Wait request delay.
 
+Step 2 uses the shared HTTP fetcher (§13, §17). Step 3 is the parser's
+`parse_listings(html)` (every listing, all conditions); steps 4–5 are the
+marketplace-agnostic `lowest_prices(listings, conditions)` reduction (§11).
+
 ---
 
 # 7. Notifications
@@ -354,19 +358,52 @@ A sprite decode failure is therefore a per-listing skip, not a per-card parser f
 
 ## Parser Interface
 
+A marketplace parser is responsible only for **extraction** — turning a page's
+raw HTML into the full set of individual listings. It does not know about
+configured conditions, baselines, or the lowest-price reduction.
+
 ```python
 can_handle(url) -> bool
-parse(html, card_config)
+parse_listings(html) -> list[Listing]
 ```
 
-Example output:
+`parse_listings` returns every listing on the page (all conditions, unfiltered),
+each as a `Listing(condition, price)` where `price` is the listing price only
+(§5). For LigaPokemon this includes decoding obfuscated `precoCss` listings
+(§10); a sprite-decode failure skips the affected listing and is reported at
+most once per page.
+
+Example `parse_listings` output:
 
 ```json
 [
-  {
-    "condition": "NM",
-    "lowest_price": 1250.00
-  }
+  {"condition": "NM", "price": 843.00},
+  {"condition": "NM", "price": 934.15},
+  {"condition": "SP", "price": 1200.00}
+]
+```
+
+## Lowest-Price Reduction
+
+Reducing the listings to the lowest price per configured condition is **not**
+marketplace-specific, so it lives outside the parser hierarchy as a pure
+function:
+
+```python
+lowest_prices(listings, conditions) -> list[PriceResult]
+```
+
+The scanner composes the two — `parse_listings(html)` then
+`lowest_prices(listings, card.conditions)`. A debugging/inspection tool
+(`tools/list_prices.py`) calls `parse_listings` on its own to print every
+listing for a URL.
+
+Example `lowest_prices` output (conditions = `["NM", "SP"]`):
+
+```json
+[
+  {"condition": "NM", "lowest_price": 843.00},
+  {"condition": "SP", "lowest_price": 1200.00}
 ]
 ```
 
@@ -547,11 +584,17 @@ card-watcher/
 │   ├── scanner.py
 │   ├── notifier.py
 │   ├── storage.py
+│   ├── fetcher.py
+│   ├── pricing.py
 │   └── config.py
 │
 ├── models/
 │   ├── card.py
+│   ├── listing.py
 │   └── price_result.py
+│
+├── tools/
+│   └── list_prices.py
 │
 └── logs/
 ```
