@@ -43,6 +43,9 @@ watcher.lock
 .idea/
 *.iml
 
+# Claude Code (local settings, memory)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
