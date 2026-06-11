@@ -539,7 +539,8 @@ card-watcher/
 │
 ├── parsers/
 │   ├── base.py
-│   ├── ligapokemon.py
+│   ├── ligapokemon_parser.py
+│   ├── sprite_decoder.py
 │   └── mypcards.py
 │
 ├── services/

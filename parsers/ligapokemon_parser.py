@@ -1,18 +1,47 @@
-"""LigaPokemon parser for the happy path price listings (FRD §10-11)."""
+"""LigaPokemon parser for FRD §10-11, including precoCss sprite decode."""
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from models.card import Card
 from models.price_result import PriceResult
 from parsers.base import MarketplaceParser
+from parsers.sprite_decoder import (
+    SpriteDecodeError,
+    SpriteDecoder,
+    parse_style_css,
+)
+
+
+@dataclass(slots=True, frozen=True)
+class SpriteDecodeContext:
+    """Context passed to the optional sprite decode error callback."""
+
+    card: Card
+    url: str
+    error_message: str
+
+
+SpriteFetcher = Callable[[str], bytes]
+SpriteErrorHandler = Callable[[SpriteDecodeContext], None]
 
 
 class LigaPokemonParser(MarketplaceParser):
     """Parse LigaPokemon card pages."""
+
+    def __init__(
+        self,
+        *,
+        sprite_fetcher: SpriteFetcher | None = None,
+        on_sprite_error: SpriteErrorHandler | None = None,
+    ) -> None:
+        self._sprite_fetcher = sprite_fetcher
+        self._on_sprite_error = on_sprite_error
 
     def can_handle(self, url: str) -> bool:
         """Return True for ligapokemon.com.br URLs, including www and queries."""
@@ -32,9 +61,24 @@ class LigaPokemonParser(MarketplaceParser):
 
         data_quality = _extract_js_literal(html, "dataQuality")
         condition_map = _build_condition_map(data_quality)
+        style_css = _extract_inline_style(html)
 
         lowest_by_condition: dict[str, float] = {}
         configured_conditions = set(card.conditions)
+        sprite_decoder: SpriteDecoder | None = None
+        sprite_setup_done = False
+        sprite_error_reported = False
+
+        def report_sprite_error(error: SpriteDecodeError) -> None:
+            # At most one sprite warning per card per scan: a page-level fault or
+            # a site-wide decoder breakage otherwise fans the same error out
+            # across every precoCss listing (FRD §10 is per-listing, but the
+            # operator only needs one alert per product).
+            nonlocal sprite_error_reported
+            if sprite_error_reported:
+                return
+            sprite_error_reported = True
+            self._emit_sprite_error(card, error)
 
         for listing in cards_stock:
             if not isinstance(listing, dict):
@@ -46,8 +90,33 @@ class LigaPokemonParser(MarketplaceParser):
 
             price = _parse_preco_final(listing)
             if price is None:
-                # TODO(precoCss): sprite-decode path, FRD §10
-                continue
+                raw_preco_css = listing.get("precoCss")
+                if not isinstance(raw_preco_css, str) or self._sprite_fetcher is None:
+                    continue
+
+                if not sprite_setup_done:
+                    sprite_setup_done = True
+                    # Parse the style block, fetch the sprite, and open it once
+                    # per page; a failure here (malformed style or undecodable
+                    # sprite) is a page-level fault shared by every precoCss
+                    # listing. A fetch HTTP error (403/429) is not a
+                    # SpriteDecodeError, so it propagates and the scanner stops
+                    # the cycle (FRD §12/§17).
+                    try:
+                        style = parse_style_css(style_css)
+                        sprite_bytes = self._sprite_fetcher(style.sprite_url)
+                        sprite_decoder = SpriteDecoder(style.position_map, sprite_bytes)
+                    except SpriteDecodeError as exc:
+                        report_sprite_error(exc)
+
+                if sprite_decoder is None:
+                    continue
+
+                try:
+                    price = sprite_decoder.decode(raw_preco_css)
+                except SpriteDecodeError as exc:
+                    report_sprite_error(exc)
+                    continue
 
             current = lowest_by_condition.get(condition)
             if current is None or price < current:
@@ -59,6 +128,15 @@ class LigaPokemonParser(MarketplaceParser):
             for condition in ordered_conditions
             if condition in lowest_by_condition
         ]
+
+    def _emit_sprite_error(self, card: Card, error: SpriteDecodeError) -> None:
+        """Forward a sprite decode error to the optional callback."""
+        if self._on_sprite_error is None:
+            return
+
+        self._on_sprite_error(
+            SpriteDecodeContext(card=card, url=card.url, error_message=str(error))
+        )
 
 
 def _extract_js_literal(html: str, name: str) -> object:
@@ -149,6 +227,12 @@ def _resolve_condition(listing: dict[str, object], condition_map: dict[int, str]
         return None
 
     return condition_map.get(qualid)
+
+
+def _extract_inline_style(html: str) -> str:
+    """Return all inline style blocks joined into one CSS string."""
+    styles = re.findall(r"<style[^>]*>(.*?)</style>", html, re.S | re.I)
+    return "\n".join(styles)
 
 
 def _parse_preco_final(listing: dict[str, object]) -> float | None:
