@@ -69,6 +69,9 @@ HTTP_TIMEOUT_SECONDS=20
 USER_AGENT=PokemonCardWatcher/1.0
 
 SEND_INITIAL_BASELINE_NOTIFICATION=false
+
+LOG_MAX_BYTES=1048576
+LOG_BACKUP_COUNT=5
 ```
 
 ---
@@ -186,6 +189,16 @@ When SEND_INITIAL_BASELINE_NOTIFICATION=true:
 Mega Gengar - NM - R$500,00 - Initial baseline - https://...
 ```
 
+## Sprite Decode Alert
+
+When a `precoCss` listing cannot be decoded (see §10), a Discord alert is sent so the breakage is noticed:
+
+```text
+⚠️ Sprite decode failed - [card name] - [url] - listing skipped
+```
+
+This is informational only; it does not affect baselines or scan history.
+
 ---
 
 # 8. Database
@@ -196,6 +209,15 @@ Technology:
 - Python sqlite3
 
 No ORM.
+
+## Durability Settings (Raspberry Pi)
+
+To minimise SD card writes and survive unexpected power loss, the SQLite connection is opened with:
+
+- `journal_mode = WAL` — fewer fsyncs and safer crash recovery than the default rollback journal.
+- `synchronous = NORMAL` — durable under application crashes, with far fewer disk syncs than `FULL`.
+
+These pragmas are applied on every connection open.
 
 ## price_baselines
 
@@ -315,6 +337,17 @@ Decoding algorithm (must be performed against a single page load):
 
 Listings without `precoCss` (the majority) require only step 2 — read `precoFinal` directly.
 
+## Sprite Decode Failure
+
+The sprite decoder is the most fragile part of the system: both the CSS class names and the sprite image are randomised per page load, and the site changes this anti-scrape mechanism without notice. When a `precoCss` listing cannot be decoded (missing style map entry, sprite download failure, unrecognised digit crop):
+
+1. Skip that individual listing — do not let it abort the card or the cycle.
+2. Continue evaluating the remaining listings for the card (a decodable listing may still yield a valid lowest price).
+3. Record the failure in `scan_errors` with `error_type = sprite_decode`.
+4. Send a Discord alert so the decoder breakage is visible and can be fixed promptly (see §7).
+
+A sprite decode failure is therefore a per-listing skip, not a per-card parser failure.
+
 ---
 
 # 11. Marketplace Architecture
@@ -356,6 +389,7 @@ Supported scenarios:
 - Timeout
 - Network failure
 - Parser failure
+- Sprite decode failure
 - Invalid configuration
 - Discord failure
 - No matching condition
@@ -368,6 +402,7 @@ Behavior:
 |---------|---------|
 | Timeout | Log and continue |
 | Parser failure | Log and continue |
+| Sprite decode failure | Skip listing, log to scan_errors, send Discord alert, continue |
 | Invalid config | Abort startup |
 | Discord failure | Log and continue |
 | 403 | Stop current cycle |
@@ -408,11 +443,17 @@ File:
 watcher.lock
 ```
 
-Behavior:
+The lock file contains the PID of the process that created it.
 
-- If lock exists, exit.
-- If lock does not exist, continue.
-- Remove lock on shutdown.
+Behavior on startup:
+
+- If the lock does not exist, create it (write current PID) and continue.
+- If the lock exists, read the stored PID:
+  - If a process with that PID is still alive, another run is in progress — exit.
+  - If no process with that PID is alive, the lock is stale (left behind by a crash, reboot, or power loss). Overwrite it with the current PID and continue.
+- Remove the lock on normal shutdown.
+
+This prevents a killed run from permanently wedging all future cron invocations, since the lock would otherwise never be removed.
 
 ---
 
@@ -428,6 +469,19 @@ Log:
 - Notification results
 - Errors
 - Retries
+
+## Log Rotation
+
+Logs are written via a size-capped rotating file handler so they can never fill the SD card:
+
+- `LOG_MAX_BYTES` — maximum size of a single log file before rotation (default 1 MiB).
+- `LOG_BACKUP_COUNT` — number of rotated files to retain (default 5).
+
+Older files beyond the backup count are deleted automatically.
+
+## Timestamps
+
+All stored and logged timestamps use the host's local timezone (see §18). The deployment assumes NTP keeps the system clock accurate.
 
 ---
 
@@ -461,6 +515,14 @@ Example:
 ```cron
 */15 * * * * cd /home/pi/card-watcher && /home/pi/card-watcher/.venv/bin/python app.py
 ```
+
+## Host Requirements
+
+The Raspberry Pi host is assumed to provide:
+
+- **NTP time sync enabled** (`timedatectl` / `systemd-timesyncd`). Timestamps are stored in local time, so an accurate clock and a correctly configured local timezone are required.
+- **Local timezone configured** for the Pi (e.g. via `raspi-config` or `timedatectl set-timezone`).
+- **cron started on boot** (default on Raspberry Pi OS) so scans resume automatically after a reboot or power loss. No long-lived daemon is used; each cron invocation is a single-run process guarded by the lock file (§15).
 
 ---
 
