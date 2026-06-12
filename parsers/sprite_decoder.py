@@ -161,21 +161,36 @@ def _mean_absolute_difference(left: Image.Image, right: Image.Image) -> float:
 
 
 def _load_reference_templates() -> tuple[tuple[str, Image.Image], ...]:
-    template_path = Path(__file__).with_name("digit_templates.png")
-    with Image.open(template_path) as template_strip:
-        strip = template_strip.convert("L")
+    """Load the digit bank: an atlas with one row per digit (0-9) and one column
+    per distinct rendered bitmap of that digit.
 
+    LigaPokemon's JPEG sprite renders each digit as one of a small, fixed set of
+    pixel-stable bitmaps (currently two per digit). A single template misses the
+    other rendering(s), so the bank holds every observed bitmap and recognition
+    is nearest-match over all of them (see :func:`_recognise_digit`). Unused
+    trailing slots in a row are left blank (all-white) and skipped here. The bank
+    is rebuilt from labelled captures by ``tools/build_digit_bank.py``.
+    """
+    bank_path = Path(__file__).with_name("digit_bank.png")
+    with Image.open(bank_path) as bank_image:
+        return _slice_bank(bank_image.convert("L"))
+
+
+def _slice_bank(bank: Image.Image) -> tuple[tuple[str, Image.Image], ...]:
+    """Slice a digit-bank atlas (row per digit 0-9, column per bitmap) into a flat
+    ``(digit, template)`` list, skipping blank (all-white) trailing slots."""
+    columns = bank.width // _TEMPLATE_CELL_WIDTH
     templates: list[tuple[str, Image.Image]] = []
-    for index, digit in enumerate("0123456789"):
-        left = index * _TEMPLATE_CELL_WIDTH
-        templates.append(
-            (
-                digit,
-                strip.crop(
-                    (left, 0, left + _TEMPLATE_CELL_WIDTH, _TEMPLATE_CELL_HEIGHT)
-                ).copy(),
-            )
-        )
+    for row, digit in enumerate("0123456789"):
+        top = row * _TEMPLATE_CELL_HEIGHT
+        for column in range(columns):
+            left = column * _TEMPLATE_CELL_WIDTH
+            cell = bank.crop(
+                (left, top, left + _TEMPLATE_CELL_WIDTH, top + _TEMPLATE_CELL_HEIGHT)
+            ).copy()
+            if cell.getextrema() == (255, 255):
+                continue  # blank slot: this digit has fewer bitmaps than the widest row
+            templates.append((digit, cell))
     return tuple(templates)
 
 

@@ -17,6 +17,38 @@ layers.
 
 ---
 
+## AS-BUILT (implemented) — simpler than this plan assumed
+
+The investigation below proposed a large multi-exemplar bank + k-NN consensus.
+Empirically the structure is **much simpler**, so the shipped solution is smaller:
+
+- Each digit renders as just **two pixel-stable bitmaps** (e.g. `9`'s two variants
+  are ~24 mean-abs-diff apart; correct matches land at ~0; nearest cross-digit
+  >7). So the asset is a tiny atlas — `parsers/digit_bank.png`, **2 templates per
+  digit** (20 total) — and recognition is the decoder's **existing nearest-match
+  + cutoff** over that list. **No k-NN consensus, no numpy, no 1,600-exemplar
+  bank.** Cutoff stays `4.0` (safe window measured as [2, 7]).
+- Labelling needs only the **price set** (read once from the page), not per-listing
+  order: `tools/build_digit_bank.py` bootstraps confident digits from the current
+  bank, unions them per listing `lj_id` across captures, and matches each listing
+  to a unique price. `tools/capture_page.py` grabs the in-session HTML+sprite
+  pairs. The old single-strip `digit_templates.*` and `build_digit_templates.py`
+  are retired.
+- **Measured result:** leave-one-capture-out over **18 live renders (1,620 digit
+  crops)** → **100% coverage, 0 misreads**. Held-out gate in
+  `tests/test_digit_bank.py` (2 fresh captures + the #4 anchor fixture, which is
+  independent of the bank and predates it) decodes every obfuscated price with
+  zero misreads. Live `list_prices` run decodes all 18 sub-R$1.000 prices.
+- **Deferred:** the dropped-listing count in the parser warning (kept this PR
+  focused on the decoder; failures are now rare). Tracked as a follow-up.
+
+The rest of this document is the original investigation/diagnosis, kept for the
+record. Where it says "k-NN consensus" / "many exemplars," read the As-Built
+above — the diagnosis (root cause, safety hazard, zero-misread gate) all held;
+only the matcher turned out simpler.
+
+---
+
 ## The measured root cause (verified live, not assumed)
 
 Probed against the live Mega Greninja page (`?...num=116`, ed CRI):
