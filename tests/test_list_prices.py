@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +13,7 @@ from PIL import Image
 
 from models.listing import Listing
 from services.fetcher import HttpFetcher, MAX_ATTEMPTS, RETRY_DELAY_SECONDS
+from services.notifier import DiscordNotifier
 from tools.list_prices import format_listings, main, run, sort_listings
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ligapokemon"
@@ -183,6 +185,79 @@ def test_sprite_decode_warning_continues(capsys) -> None:
     assert captured.err.splitlines() == [
         "\u26a0\ufe0f sprite decode failed: Sprite digit crop did not match a known template"
     ]
+
+
+def test_main_notify_posts_initial_baseline_per_condition(capsys) -> None:
+    fetcher = _fixture_fetcher()
+    posts: list[httpx.Request] = []
+
+    def webhook(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(204)
+
+    notifier = DiscordNotifier("https://discord.example/webhook", client=_client(webhook))
+
+    exit_code = main(
+        ["--notify", "--name", "Mega Greninja", PAGE_URL],
+        fetcher=fetcher,
+        notifier=notifier,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.splitlines()[0] == "NM 843.00"
+    # The fixture only has NM listings, so exactly one baseline message is sent.
+    assert len(posts) == 1
+    assert json.loads(posts[0].content.decode("utf-8")) == {
+        "content": f"Mega Greninja - NM - R$843,00 - Initial baseline - {PAGE_URL}"
+    }
+    assert "notified NM R$843,00: sent" in captured.err
+
+
+def test_main_notify_defaults_card_name_to_url(capsys) -> None:
+    fetcher = _fixture_fetcher()
+    posts: list[httpx.Request] = []
+
+    def webhook(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(204)
+
+    notifier = DiscordNotifier("https://discord.example/webhook", client=_client(webhook))
+
+    exit_code = main(["--notify", PAGE_URL], fetcher=fetcher, notifier=notifier)
+
+    assert exit_code == 0
+    content = json.loads(posts[0].content.decode("utf-8"))["content"]
+    assert content == f"{PAGE_URL} - NM - R$843,00 - Initial baseline - {PAGE_URL}"
+
+
+def test_main_without_notify_sends_nothing(capsys) -> None:
+    fetcher = _fixture_fetcher()
+    posts: list[httpx.Request] = []
+
+    def webhook(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(204)
+
+    notifier = DiscordNotifier("https://discord.example/webhook", client=_client(webhook))
+
+    # Notifier supplied but --notify absent: the tool must not post anything.
+    exit_code = main([PAGE_URL], fetcher=fetcher, notifier=notifier)
+
+    assert exit_code == 0
+    assert posts == []
+
+
+def test_main_notify_without_webhook_url_errors(capsys, monkeypatch) -> None:
+    monkeypatch.setattr("tools.list_prices.load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    fetcher = _fixture_fetcher()
+
+    exit_code = main(["--notify", PAGE_URL], fetcher=fetcher)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "DISCORD_WEBHOOK_URL is not set" in captured.err
 
 
 def test_empty_page_prints_note(capsys) -> None:
