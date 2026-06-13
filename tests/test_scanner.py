@@ -19,6 +19,7 @@ from services.scanner import Scanner
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ligapokemon"
 GENGAR_HTML = (FIXTURE_DIR / "mega_gengar_284.html").read_text(encoding="utf-8")
 GRENINJA_HTML = (FIXTURE_DIR / "greninja_116_precocss.html").read_text(encoding="utf-8")
+ETB_HTML = (FIXTURE_DIR / "etb_ascended_heroes_prod.html").read_text(encoding="utf-8")
 GRENINJA_SPRITE = (FIXTURE_DIR / "greninja_116_sprite.jpg").read_bytes()
 GRENINJA_SPRITE_URL = (
     "https://repositorio.sbrauble.com/arquivos/up/comp/imgnum/files/img/"
@@ -139,8 +140,23 @@ def _card(
     *,
     name: str = "Mega Gengar",
     conditions: tuple[str, ...] = ("NM",),
+    is_sealed: bool = False,
 ) -> Card:
-    return Card(name=name, conditions=conditions, url=f"{LIGA_BASE}/{suffix}")
+    return Card(
+        name=name,
+        conditions=conditions,
+        url=f"{LIGA_BASE}/{suffix}",
+        is_sealed=is_sealed,
+    )
+
+
+def _sealed_card(suffix: str = "etb") -> Card:
+    return _card(
+        suffix,
+        name="ETB Ascended Heroes",
+        conditions=(),
+        is_sealed=True,
+    )
 
 
 def _page_routes(*cards: Card, html: str = GENGAR_HTML) -> dict[str, list[httpx.Response]]:
@@ -211,6 +227,24 @@ def _sprite_stop_html() -> str:
                 .digit{background-position:0px 0px;}
                 .foo{background-image:url(//example.com/imgnum/stop.jpg)}
             </style>
+        </html>
+    """
+
+
+def _sealed_prod_html(stock: list[dict[str, object]]) -> str:
+    return f"""
+        <html>
+            <script>
+                var prod_stock = {json.dumps(stock)};
+                var dataQuality = [
+                    {{"id":1,"acron":"L","label":"Lacrado (L)"}},
+                    {{"id":2,"acron":"N","label":"Novo (N)"}},
+                    {{"id":3,"acron":"NEA","label":"Novo aberto (NEA)"}},
+                    {{"id":4,"acron":"NSA","label":"Novo sem acessorios (NSA)"}},
+                    {{"id":5,"acron":"U","label":"Usado (U)"}},
+                    {{"id":6,"acron":"D","label":"Defeituoso (D)"}}
+                ];
+            </script>
         </html>
     """
 
@@ -365,6 +399,144 @@ def test_no_matching_condition_is_logged_as_noop_without_scan_error() -> None:
         assert _count(conn, "scan_results") == 1
         assert _count(conn, "scan_errors") == 0
         assert notifier.all_time_lows == []
+    finally:
+        conn.close()
+
+
+def test_sealed_first_sight_creates_sealed_baseline_without_all_time_low_notification() -> None:
+    conn = _conn()
+    try:
+        card = _sealed_card()
+        routes: dict[str, list[httpx.Response | Exception]] = {
+            card.url: [httpx.Response(200, text=ETB_HTML)],
+            GRENINJA_SPRITE_URL: [httpx.Response(200, content=GRENINJA_SPRITE)],
+        }
+        sleeps: list[float] = []
+        notifier = SpyNotifier()
+        scanner = _scanner(conn, RouteHandler(routes), notifier, sleeps)
+
+        outcome = scanner.scan_card(card)
+
+        baseline = storage.get_baseline(conn, card.card_id, "SEALED")
+        assert baseline is not None
+        assert baseline.lowest_price == 843.0
+        assert outcome.initial_baselines == ("SEALED",)
+        assert outcome.new_lows == ()
+        assert notifier.all_time_lows == []
+        assert [(row["condition"], row["lowest_price"]) for row in _scan_results(conn)] == [
+            ("SEALED", 843.0)
+        ]
+        assert sleeps == [2]
+    finally:
+        conn.close()
+
+
+def test_sealed_lower_scan_notifies_with_sealed_label_and_updates_baseline() -> None:
+    conn = _conn()
+    try:
+        card = _sealed_card()
+        first_html = _sealed_prod_html([{"qualid": "1", "precoFinal": "900.00"}])
+        second_html = _sealed_prod_html([{"qualid": "1", "precoFinal": "700.00"}])
+        routes = {
+            card.url: [
+                httpx.Response(200, text=first_html),
+                httpx.Response(200, text=second_html),
+            ],
+        }
+        notifier = SpyNotifier()
+        scanner = _scanner(conn, RouteHandler(routes), notifier)
+
+        scanner.scan_card(card)
+        outcome = scanner.scan_card(card)
+
+        assert outcome.new_lows == ("SEALED",)
+        assert notifier.all_time_lows == [
+            {
+                "card_name": "ETB Ascended Heroes",
+                "condition": "SEALED",
+                "price": 700.0,
+                "previous_lowest": 900.0,
+                "url": card.url,
+            }
+        ]
+        assert storage.get_baseline(conn, card.card_id, "SEALED").lowest_price == 700.0
+        assert [(row["condition"], row["lowest_price"]) for row in _scan_results(conn)] == [
+            ("SEALED", 900.0),
+            ("SEALED", 700.0),
+        ]
+    finally:
+        conn.close()
+
+
+def test_sealed_tracks_l_price_when_non_sealed_listing_is_cheaper() -> None:
+    conn = _conn()
+    try:
+        card = _sealed_card()
+        html = _sealed_prod_html(
+            [
+                {"qualid": "6", "precoFinal": "10.00"},
+                {"qualid": "5", "precoFinal": "20.00"},
+                {"qualid": "1", "precoFinal": "80.00"},
+            ]
+        )
+        notifier = SpyNotifier()
+        scanner = _scanner(conn, RouteHandler(_page_routes(card, html=html)), notifier)
+
+        outcome = scanner.scan_card(card)
+
+        assert [(result.condition, result.lowest_price) for result in outcome.results] == [
+            ("SEALED", 80.0)
+        ]
+        assert storage.get_baseline(conn, card.card_id, "SEALED").lowest_price == 80.0
+    finally:
+        conn.close()
+
+
+def test_sealed_page_without_l_listing_is_noop_without_scan_error() -> None:
+    conn = _conn()
+    try:
+        card = _sealed_card()
+        html = _sealed_prod_html(
+            [
+                {"qualid": "6", "precoFinal": "10.00"},
+                {"qualid": "5", "precoFinal": "20.00"},
+            ]
+        )
+        notifier = SpyNotifier()
+        scanner = _scanner(conn, RouteHandler(_page_routes(card, html=html)), notifier)
+
+        outcome = scanner.scan_card(card)
+
+        assert outcome.results == ()
+        assert _count(conn, "scan_results") == 0
+        assert _count(conn, "price_baselines") == 0
+        assert _count(conn, "scan_errors") == 0
+        assert notifier.all_time_lows == []
+    finally:
+        conn.close()
+
+
+def test_mixed_card_and_sealed_list_processes_both_modes() -> None:
+    conn = _conn()
+    try:
+        card_mode = _card("gengar")
+        sealed = _sealed_card("etb")
+        sealed_html = _sealed_prod_html([{"qualid": "1", "precoFinal": "100.00"}])
+        routes = {
+            card_mode.url: [httpx.Response(200, text=GENGAR_HTML)],
+            sealed.url: [httpx.Response(200, text=sealed_html)],
+        }
+        sleeps: list[float] = []
+        notifier = SpyNotifier()
+        scanner = _scanner(conn, RouteHandler(routes), notifier, sleeps)
+
+        summary = scanner.run([card_mode, sealed])
+
+        assert storage.get_baseline(conn, card_mode.card_id, "NM").lowest_price == 2670.0
+        assert storage.get_baseline(conn, sealed.card_id, "SEALED").lowest_price == 100.0
+        assert summary.cards_scanned == 2
+        assert summary.cards_failed == 0
+        assert sleeps == [30]
     finally:
         conn.close()
 

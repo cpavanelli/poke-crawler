@@ -42,7 +42,7 @@ class LigaPokemonParser(MarketplaceParser):
 
     def parse_listings(self, html: str) -> list[Listing]:
         """Parse the page HTML and return every priced listing."""
-        cards_stock = _extract_js_literal(html, "cards_stock")
+        cards_stock = _extract_first_js_literal(html, ("prod_stock", "cards_stock"))
         if not isinstance(cards_stock, list):
             raise ValueError("LigaPokemon cards_stock must be a JSON array")
         if not cards_stock:
@@ -118,11 +118,21 @@ class LigaPokemonParser(MarketplaceParser):
         self._on_sprite_error(message)
 
 
+class _VariableNotFound(ValueError):
+    """Raised when a named ``var`` literal is absent from the page.
+
+    A subclass of :class:`ValueError` so callers that only care that extraction
+    failed keep working, while :func:`_extract_first_js_literal` can distinguish
+    "this candidate is absent, try the next" from a genuine parse fault without
+    matching on the error message text.
+    """
+
+
 def _extract_js_literal(html: str, name: str) -> object:
     """Extract and decode a JSON-compatible JavaScript literal from the page."""
     match = re.search(rf"\bvar\s+{re.escape(name)}\s*=\s*", html)
     if match is None:
-        raise ValueError(f"LigaPokemon variable not found: {name}")
+        raise _VariableNotFound(f"LigaPokemon variable not found: {name}")
 
     start = match.end()
     while start < len(html) and html[start].isspace():
@@ -172,6 +182,23 @@ def _extract_js_literal(html: str, name: str) -> object:
                 return json.loads(html[start : index + 1])
 
     raise ValueError(f"LigaPokemon variable was not terminated: {name}")
+
+
+def _extract_first_js_literal(html: str, names: tuple[str, ...]) -> object:
+    """Extract the first present JavaScript literal among candidate names.
+
+    Tries each name in order, skipping ones that are simply absent
+    (:class:`_VariableNotFound`). Any other failure (malformed literal,
+    unbalanced brackets) propagates immediately rather than masking a real fault
+    behind the next candidate.
+    """
+    for name in names:
+        try:
+            return _extract_js_literal(html, name)
+        except _VariableNotFound:
+            continue
+
+    raise _VariableNotFound(f"LigaPokemon variable not found: {' or '.join(names)}")
 
 
 def _build_condition_map(data_quality: object) -> dict[int, str]:

@@ -98,6 +98,8 @@ def load_cards(path: Path) -> tuple[Card, ...]:
     """Load and validate the card list from a JSON file (FRD §3).
 
     Unknown keys on each card object are ignored for forward compatibility.
+    Entries without ``conditions`` or with an empty ``conditions`` array are
+    sealed products and track one SEALED price.
 
     Raises:
         ConfigError: If the file is missing, not valid JSON, not a non-empty
@@ -122,20 +124,25 @@ def load_cards(path: Path) -> tuple[Card, ...]:
 
 
 def _parse_card(entry: object, index: int) -> Card:
-    """Validate one raw card object and build a :class:`Card`."""
+    """Validate one raw card object and build a :class:`Card` (FRD §3)."""
     if not isinstance(entry, dict):
         raise ConfigError(f"Card at index {index} must be a JSON object")
 
     name = entry.get("name")
     url = entry.get("url")
-    conditions = entry.get("conditions")
-
     if not isinstance(name, str) or not name.strip():
         raise ConfigError(f"Card at index {index} is missing a non-empty 'name'")
     if not isinstance(url, str) or not url.strip():
         raise ConfigError(f"Card {name!r} is missing a non-empty 'url'")
-    if not isinstance(conditions, list) or not conditions:
-        raise ConfigError(f"Card {name!r} must have a non-empty 'conditions' array")
+
+    if "conditions" not in entry:
+        return Card(name=name.strip(), conditions=(), url=url.strip(), is_sealed=True)
+
+    conditions = entry["conditions"]
+    if not isinstance(conditions, list):
+        raise ConfigError(f"Card {name!r} must have a 'conditions' array")
+    if not conditions:
+        return Card(name=name.strip(), conditions=(), url=url.strip(), is_sealed=True)
 
     normalized: list[str] = []
     for condition in conditions:

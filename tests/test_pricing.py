@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from models.listing import Listing
-from services.pricing import lowest_prices
+from services.pricing import SEALED_LABEL, lowest_prices, lowest_sealed_price
 
 
 def test_lowest_prices_picks_minimum_per_condition() -> None:
@@ -49,3 +49,44 @@ def test_lowest_prices_output_order_follows_requested_conditions_and_omits_missi
 
 def test_lowest_prices_empty_input_returns_empty_list() -> None:
     assert lowest_prices([], ("NM", "SP")) == []
+
+
+def test_lowest_sealed_price_counts_only_factory_sealed_condition() -> None:
+    listings = [
+        Listing(condition="N", price=50.0),
+        Listing(condition="NEA", price=40.0),
+        Listing(condition="NSA", price=30.0),
+        Listing(condition="A", price=20.0),
+        Listing(condition="U", price=10.0),
+        Listing(condition="D", price=5.0),
+        Listing(condition="L", price=80.0),
+    ]
+
+    result = lowest_sealed_price(listings)
+
+    assert result is not None
+    assert result.condition == SEALED_LABEL
+    assert result.lowest_price == 80.0
+
+
+def test_lowest_sealed_price_picks_minimum_l_listing() -> None:
+    listings = [
+        Listing(condition="L", price=90.0),
+        Listing(condition="D", price=1.0),
+        Listing(condition="L", price=75.0),
+    ]
+
+    result = lowest_sealed_price(listings)
+
+    assert result is not None
+    assert result.condition == SEALED_LABEL
+    assert result.lowest_price == 75.0
+
+
+def test_lowest_sealed_price_returns_none_without_l_listing() -> None:
+    listings = [
+        Listing(condition="D", price=5.0),
+        Listing(condition="U", price=10.0),
+    ]
+
+    assert lowest_sealed_price(listings) is None

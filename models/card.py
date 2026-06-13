@@ -23,17 +23,20 @@ def card_id_for(url: str) -> str:
 
 @dataclass(slots=True, frozen=True)
 class Card:
-    """A configured card to monitor.
+    """A configured card or sealed product to monitor.
 
     Attributes:
         name: Display-only name.
-        conditions: Conditions to track, as uppercase acronyms (e.g. "NM").
+        conditions: Conditions to track, as uppercase acronyms (e.g. "NM"),
+            or an empty tuple for a sealed product (FRD §3).
         url: The marketplace listing URL; the source of the card identity.
+        is_sealed: True when this entry tracks one SEALED product price (FRD §5).
     """
 
     name: str
     conditions: tuple[str, ...]
     url: str
+    is_sealed: bool = False
 
     @property
     def card_id(self) -> str:

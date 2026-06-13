@@ -115,6 +115,31 @@ def test_valid_cards_load(tmp_path: Path) -> None:
     assert [c.name for c in cards] == ["Mega Gengar", "Charizard"]
     # conditions normalised to uppercase
     assert cards[1].conditions == ("NM", "SP")
+    assert cards[1].is_sealed is False
+
+
+def test_missing_conditions_loads_as_sealed_product(tmp_path: Path) -> None:
+    path = _write_cards(
+        tmp_path,
+        [{"name": "ETB Ascended Heroes", "url": "https://x/sealed"}],
+    )
+
+    (card,) = load_cards(path)
+
+    assert card.is_sealed is True
+    assert card.conditions == ()
+
+
+def test_empty_conditions_loads_as_sealed_product(tmp_path: Path) -> None:
+    path = _write_cards(
+        tmp_path,
+        [{"name": "ETB Ascended Heroes", "conditions": [], "url": "https://x/sealed"}],
+    )
+
+    (card,) = load_cards(path)
+
+    assert card.is_sealed is True
+    assert card.conditions == ()
 
 
 def test_unknown_card_keys_ignored(tmp_path: Path) -> None:
@@ -156,8 +181,8 @@ def test_missing_url_aborts(tmp_path: Path) -> None:
         load_cards(path)
 
 
-def test_empty_conditions_aborts(tmp_path: Path) -> None:
-    path = _write_cards(tmp_path, [{"name": "X", "conditions": [], "url": "https://x/a"}])
+def test_non_list_conditions_aborts(tmp_path: Path) -> None:
+    path = _write_cards(tmp_path, [{"name": "X", "conditions": "NM", "url": "https://x/a"}])
     with pytest.raises(ConfigError, match="conditions"):
         load_cards(path)
 

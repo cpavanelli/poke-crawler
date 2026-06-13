@@ -11,6 +11,8 @@ Status: Approved for Development
 
 The Pokémon Card Price Watcher is a lightweight monitoring application that periodically scans configured Pokémon card marketplace pages, tracks the lowest available listing prices for selected card conditions, stores historical pricing data, and sends Discord notifications when a new all-time-low price is detected.
 
+It also monitors **sealed products** (e.g. Elite Trainer Boxes), which are tracked as a single lowest price with no per-condition breakdown (see §5).
+
 Initial implementation targets LigaPokemon.
 
 The architecture must be extensible to support additional marketplaces in the future, such as MYP Cards.
@@ -49,6 +51,25 @@ The architecture must be extensible to support additional marketplaces in the fu
   }
 ]
 ```
+
+### Sealed Products
+
+A sealed product is configured by **omitting the `conditions` array**. Its absence is the marker for sealed mode; no new field is introduced. A sealed product is tracked as a single lowest price (§5), so it has no conditions to list.
+
+```json
+[
+  {
+    "name": "ETB - Megaevolution Series - Ascended Heroes",
+    "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=135115&prod=..."
+  }
+]
+```
+
+Validation:
+
+- If `conditions` is present, it must be a non-empty array of valid card condition acronyms (card mode).
+- If `conditions` is absent (or empty), the entry is a sealed product (sealed mode).
+- Card identity is still `SHA256(url)` (§9), unaffected by mode.
 
 Unknown JSON properties must be ignored for forward compatibility.
 
@@ -131,6 +152,19 @@ Example:
 NM = R$1.250,00
 SP = R$950,00
 
+## Sealed Products
+
+A sealed product (configured by omitting `conditions`, §3) is tracked as a **single lowest price**, not per condition. However, "ignore conditions" does not mean "ignore quality entirely": a sealed-product page mixes genuinely sealed/new boxes with the occasional used or defective unit, and the cheapest listing is frequently a damaged one. Surfacing that as the product's price would be misleading.
+
+Therefore the lowest sealed price is the minimum listing price over only the **factory-sealed** listings:
+
+- **Included** quality acronym: `L` (Lacrado / sealed) only.
+- **Excluded:** every other acronym — `A` (Aberto), `N` (Novo), `NEA` (Novo com embalagem aberta), `NSA` (Novo sem embalagem), `U` (Usado), `D` (Com defeito / avaria). Only an unambiguously factory-sealed box counts; "new", "opened", "no packaging", used, and damaged are all excluded.
+
+These acronyms come from the sealed-product `dataQuality` map (§10), which is a different set from the card conditions.
+
+The result is stored, compared, and notified under a single synthetic condition label, `SEALED`, so the existing `(card_id, condition)` storage schema (§8) and Discord format (§7) are reused unchanged. Shipping is still ignored (listing price only). If a sealed page yields no included listing (all used/defective, or all sprite decodes failed), there is no result for that product on that scan — log and continue, exactly like "no matching condition" (§12).
+
 ---
 
 # 6. Scan Workflow
@@ -143,7 +177,7 @@ For each configured card:
 4. Filter by configured conditions.
 5. Determine lowest price per condition.
 6. Store scan history.
-7. Compare against baseline.
+7. Compare against baseline. 
 8. Send notification if a new all-time-low exists.
 9. Update baseline.
 10. Wait request delay.
@@ -151,6 +185,10 @@ For each configured card:
 Step 2 uses the shared HTTP fetcher (§13, §17). Step 3 is the parser's
 `parse_listings(html)` (every listing, all conditions); steps 4–5 are the
 marketplace-agnostic `lowest_prices(listings, conditions)` reduction (§11).
+
+For a **sealed product**, steps 4–5 instead use the sealed reduction (§5, §11):
+filter to the included sealed/new acronyms and take a single lowest price under
+the `SEALED` label. Steps 6–9 are identical in both modes.
 
 ---
 
@@ -297,6 +335,26 @@ The relevant variables injected into the page are:
 | `cards_stores` | Object keyed by store ID with store name and location |
 | `dataQuality` | Array mapping condition IDs to condition labels |
 
+### Sealed-product pages (`view=prod/view`)
+
+Sealed products use the `view=prod/view&pcode=...` page layout instead of `view=cards/card`. The data shape is identical, but the listing and store arrays are named **`prod_stock`** and **`prod_stores`** (same fields, including `precoFinal` / `precoCss` / `qualid` / `lj_id`). `dataQuality` is still present and is still parsed dynamically from the page.
+
+The parser must read `prod_stock` / `prod_stores` when present and fall back to `cards_stock` / `cards_stores` otherwise. No other parser logic changes: `precoFinal`, the `precoCss` sprite-decode path (below), and the dynamic `dataQuality` map all work unchanged.
+
+The sealed-product `dataQuality` uses a **different acronym set** from cards (the parser maps it dynamically, so this is not hardcoded):
+
+| qualid | acron | label |
+|---|---|---|
+| 1 | A | Aberto |
+| 2 | L | Lacrado |
+| 3 | N | Novo |
+| 4 | NEA | Novo com embalagem aberta |
+| 5 | NSA | Novo sem embalagem |
+| 6 | U | Usado |
+| 7 | D | Com defeito / avaria |
+
+Which of these count toward the lowest sealed price is defined in §5 (included: `L` only).
+
 ## Extracting Listings
 
 Parse `cards_stock` from the raw HTML using a regex or string search for `var cards_stock = `. Each entry contains:
@@ -397,6 +455,21 @@ The scanner composes the two — `parse_listings(html)` then
 `lowest_prices(listings, card.conditions)`. A debugging/inspection tool
 (`tools/list_prices.py`) calls `parse_listings` on its own to print every
 listing for a URL.
+
+For sealed products the reduction differs but is still marketplace-agnostic and
+parser-independent — the parser still returns every listing with its raw acronym
+(§10). A sibling pure function reduces those to one sealed price:
+
+```python
+lowest_sealed_price(listings) -> PriceResult | None
+```
+
+It keeps only the included sealed/new acronyms (§5), takes the minimum listing
+price, and returns a single `PriceResult(condition="SEALED", ...)`, or `None`
+when no included listing exists. The scanner branches on the card's mode (§3):
+card mode calls `lowest_prices`, sealed mode calls `lowest_sealed_price`. The
+parser does **not** branch — page-type detection (`prod_stock` vs `cards_stock`)
+lives in extraction (§10), and sealed-vs-card filtering lives in the reduction.
 
 Example `lowest_prices` output (conditions = `["NM", "SP"]`):
 

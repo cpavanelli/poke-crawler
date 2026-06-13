@@ -19,6 +19,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ligapokemon"
 GENGAR_FIXTURE_PATH = FIXTURE_DIR / "mega_gengar_284.html"
 GRENINJA_FIXTURE_PATH = FIXTURE_DIR / "greninja_116_precocss.html"
 GRENINJA_SPRITE_PATH = FIXTURE_DIR / "greninja_116_sprite.jpg"
+ETB_FIXTURE_PATH = FIXTURE_DIR / "etb_ascended_heroes_prod.html"
 
 
 def _load_fixture(path: Path) -> str:
@@ -99,6 +100,19 @@ def test_parse_listings_uses_sprite_decode_when_fetcher_is_configured() -> None:
     assert Listing(condition="NM", price=843.0) in listings
     assert fetch_calls == [
         "https://repositorio.sbrauble.com/arquivos/up/comp/imgnum/files/img/260422lT92f3zskqjd04i6zfa6z2q78n23hf.jpg"
+    ]
+
+
+def test_parse_listings_supports_prod_stock_with_sealed_acronyms() -> None:
+    sprite_bytes = GRENINJA_SPRITE_PATH.read_bytes()
+    parser = LigaPokemonParser(sprite_fetcher=lambda _url: sprite_bytes)
+
+    listings = parser.parse_listings(_load_fixture(ETB_FIXTURE_PATH))
+
+    assert listings == [
+        Listing(condition="L", price=843.0),
+        Listing(condition="L", price=900.0),
+        Listing(condition="D", price=805.0),
     ]
 
 

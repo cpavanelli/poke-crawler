@@ -14,7 +14,7 @@ from parsers.ligapokemon_parser import LigaPokemonParser, SpriteErrorHandler, Sp
 from services import storage
 from services.fetcher import CycleStop, FetchError, HttpFetcher
 from services.notifier import DiscordNotifier
-from services.pricing import lowest_prices
+from services.pricing import lowest_prices, lowest_sealed_price
 from services.storage import local_now_iso
 
 logger = logging.getLogger(__name__)
@@ -169,13 +169,19 @@ class Scanner:
                 error_type="parse",
             )
 
-        results = tuple(lowest_prices(listings, card.conditions))
-        result_conditions = {result.condition for result in results}
-        missing = [
-            condition for condition in card.conditions if condition not in result_conditions
-        ]
-        if missing:
-            logger.info("No listings for %s conditions %s", card.name, missing)
+        if card.is_sealed:
+            sealed_result = lowest_sealed_price(listings)
+            results = (sealed_result,) if sealed_result is not None else ()
+            if not results:
+                logger.info("No sealed listing for %s", card.name)
+        else:
+            results = tuple(lowest_prices(listings, card.conditions))
+            result_conditions = {result.condition for result in results}
+            missing = [
+                condition for condition in card.conditions if condition not in result_conditions
+            ]
+            if missing:
+                logger.info("No listings for %s conditions %s", card.name, missing)
 
         new_lows: list[str] = []
         initial_baselines: list[str] = []

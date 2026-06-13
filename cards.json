@@ -1,12 +1,20 @@
 [
   {
     "name": "Mega Gengar",
-    "conditions": ["NM"],
+    "conditions": ["NM", "SP"],
     "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Gengar+ex%20(284/217)&show=1&ed=ASC&num=284"
   },
   {
-    "name": "Mega Charizard X",
+    "name": "Mew ex",
     "conditions": ["NM", "SP"],
-    "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Charizard+X+ex%20(125/094)&show=1&ed=PFL&num=125"
+    "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mew%20ex%20(232/091)&ed=PAF&num=232"
+  },
+  {
+    "name": "ETB - Ascended Heroes",
+    "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=135115&prod=Elite-Trainer-Box---Mega-Evolution---Ascended-Heroes"
+  },
+  {
+    "name": "ETB - Phantasmal Flames",
+    "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=134380&prod=%28ING%29+Elite+Trainer+Box+-+Megaevolution+Series+-+Phantasmal+Flames"
   }
 ]
