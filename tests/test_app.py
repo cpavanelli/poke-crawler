@@ -31,7 +31,6 @@ def _app_config(tmp_path: Path) -> AppConfig:
         discord_webhook_url="https://discord.example/webhook",
         cards_config_path=tmp_path / "cards.json",
         database_path=tmp_path / "watcher.db",
-        check_interval_minutes=15,
         request_delay_seconds=30,
         sprite_request_delay_seconds=2,
         http_timeout_seconds=20,

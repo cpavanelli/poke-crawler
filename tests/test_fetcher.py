@@ -178,7 +178,6 @@ def test_from_app_config_maps_settings() -> None:
         discord_webhook_url="https://discord.example/webhook",
         cards_config_path=Path("cards.json"),
         database_path=Path("watcher.db"),
-        check_interval_minutes=15,
         request_delay_seconds=11,
         sprite_request_delay_seconds=3,
         http_timeout_seconds=7,

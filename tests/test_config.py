@@ -28,7 +28,6 @@ def _set_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
     for key in (
         "CARDS_CONFIG_PATH",
         "DATABASE_PATH",
-        "CHECK_INTERVAL_MINUTES",
         "REQUEST_DELAY_SECONDS",
         "SPRITE_REQUEST_DELAY_SECONDS",
         "HTTP_TIMEOUT_SECONDS",
@@ -56,7 +55,6 @@ def test_app_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_env(monkeypatch)
     app = load_app_config(_NO_ENV)
     assert app.discord_webhook_url == _REQUIRED_ENV["DISCORD_WEBHOOK_URL"]
-    assert app.check_interval_minutes == 15
     assert app.request_delay_seconds == 30
     assert app.sprite_request_delay_seconds == 2
     assert app.http_timeout_seconds == 20
@@ -74,8 +72,8 @@ def test_missing_webhook_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_non_integer_env_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_env(monkeypatch, CHECK_INTERVAL_MINUTES="soon")
-    with pytest.raises(ConfigError, match="CHECK_INTERVAL_MINUTES"):
+    _set_env(monkeypatch, HTTP_TIMEOUT_SECONDS="soon")
+    with pytest.raises(ConfigError, match="HTTP_TIMEOUT_SECONDS"):
         load_app_config(_NO_ENV)
 
 

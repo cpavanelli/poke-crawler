@@ -81,7 +81,6 @@ DISCORD_WEBHOOK_URL=
 CARDS_CONFIG_PATH=cards.json
 DATABASE_PATH=watcher.db
 
-CHECK_INTERVAL_MINUTES=15
 REQUEST_DELAY_SECONDS=30
 SPRITE_REQUEST_DELAY_SECONDS=2
 
@@ -101,7 +100,9 @@ LOG_BACKUP_COUNT=5
 
 ## Recheck Timer
 
-The entire card list is scanned every CHECK_INTERVAL_MINUTES.
+The entire card list is scanned once per invocation. The recheck cadence is set
+by the cron schedule on the host (§18), not by an in-app interval — each cron tick
+runs one single-run scan. There is no `CHECK_INTERVAL_MINUTES` setting.
 
 ## Request Delay Timer
 

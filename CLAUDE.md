@@ -26,6 +26,7 @@ This runs unattended for long periods on an SD card. Keep changes SD-friendly an
 - **Lock file stores a PID** (FRD §15). On startup: stale lock (PID not alive) is overwritten and the run continues; live PID means another run is in progress, so exit. Always remove the lock on normal shutdown.
 - **Timestamps are local time**, and the host is assumed to have NTP enabled (FRD §16, §18).
 - **Sprite decode failure** = skip that listing, log to `scan_errors` with `error_type=sprite_decode`, send a Discord alert, and continue. It is NOT a per-card parser failure (FRD §7, §10, §12).
+- **The scan interval lives in cron, not the app.** `app.py` runs exactly one scan per invocation; the recheck cadence is the crontab schedule on the host (FRD §18). There is intentionally no `CHECK_INTERVAL_MINUTES` env var — don't re-add an in-app interval or sleep loop. Only `REQUEST_DELAY_SECONDS` / `SPRITE_REQUEST_DELAY_SECONDS` pace requests *within* a single run.
 
 ## Architecture
 

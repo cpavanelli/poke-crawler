@@ -34,7 +34,6 @@ class AppConfig:
     discord_webhook_url: str
     cards_config_path: Path
     database_path: Path
-    check_interval_minutes: int
     request_delay_seconds: int
     sprite_request_delay_seconds: int
     http_timeout_seconds: int
@@ -81,7 +80,6 @@ def load_app_config(env_path: str | os.PathLike[str] | None = None) -> AppConfig
         discord_webhook_url=_require_str("DISCORD_WEBHOOK_URL"),
         cards_config_path=Path(os.getenv("CARDS_CONFIG_PATH", "cards.json")),
         database_path=Path(os.getenv("DATABASE_PATH", "watcher.db")),
-        check_interval_minutes=_positive_int("CHECK_INTERVAL_MINUTES", 15),
         request_delay_seconds=_positive_int("REQUEST_DELAY_SECONDS", 30),
         sprite_request_delay_seconds=_positive_int("SPRITE_REQUEST_DELAY_SECONDS", 2),
         http_timeout_seconds=_positive_int("HTTP_TIMEOUT_SECONDS", 20),
