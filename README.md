@@ -55,27 +55,41 @@ cp .env.example .env
 > host (see *Deploy*), not an in-app interval. The delays above only pace requests *within*
 > a single scan.
 
-**2. `cards.json`** — the cards and sealed products to watch. Card identity is `SHA256(url)`;
-names are display-only.
+**2. `cards.json`** — what to watch. Entry identity is `SHA256(url)`; names are display-only.
+Every entry needs a **`type`**: `"price"` (the price watcher) or `"new_product"` (the
+New-Product Watch). A missing or unknown `type` aborts startup.
 
 ```json
 [
   {
     "name": "Mega Gengar",
+    "type": "price",
     "conditions": ["NM", "SP"],
     "url": "https://www.ligapokemon.com.br/?view=cards/card&card=...&num=284"
   },
   {
     "name": "ETB - Ascended Heroes",
+    "type": "price",
     "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=135115&prod=..."
+  },
+  {
+    "name": "Shisui Pré-venda",
+    "type": "new_product",
+    "url": "https://www.shisuistore.com.br/pre-venda/"
   }
 ]
 ```
 
-- **Card mode:** include a non-empty `conditions` array of valid acronyms
-  (`M`, `NM`, `SP`, `MP`, `HP`, `D`). Each condition is tracked independently.
-- **Sealed mode:** omit `conditions` (or leave it empty). The product is tracked as a single
-  `SEALED` lowest price over factory-sealed (`L`) listings only (FRD §5).
+- **`type: "price"`** — tracks the lowest price and alerts on a new all-time low.
+  - **Card mode:** include a non-empty `conditions` array of valid acronyms
+    (`M`, `NM`, `SP`, `MP`, `HP`, `D`). Each condition is tracked independently.
+  - **Sealed mode:** omit `conditions` (or leave it empty). The product is tracked as a single
+    `SEALED` lowest price over factory-sealed (`L`) listings only (FRD §5).
+- **`type: "new_product"`** — watches a collection/listing URL and alerts when a product is
+  **newly listed** or **restocked** (sold-out → in-stock), never on price moves (FRD §21).
+  `conditions` is unused. Only page 1 is fetched (one request per watch), the first scan
+  seeds silently, and all changes from one scan arrive in a single Discord message.
+  Supported store: Shisui Store (Nuvemshop).
 - Unknown JSON keys are ignored for forward compatibility.
 
 ## Run

@@ -105,8 +105,8 @@ def test_valid_cards_load(tmp_path: Path) -> None:
     path = _write_cards(
         tmp_path,
         [
-            {"name": "Mega Gengar", "conditions": ["NM"], "url": "https://x/a"},
-            {"name": "Charizard", "conditions": ["nm", "SP"], "url": "https://x/b"},
+            {"name": "Mega Gengar", "type": "price", "conditions": ["NM"], "url": "https://x/a"},
+            {"name": "Charizard", "type": "price", "conditions": ["nm", "SP"], "url": "https://x/b"},
         ],
     )
     cards = load_cards(path)
@@ -119,7 +119,7 @@ def test_valid_cards_load(tmp_path: Path) -> None:
 def test_missing_conditions_loads_as_sealed_product(tmp_path: Path) -> None:
     path = _write_cards(
         tmp_path,
-        [{"name": "ETB Ascended Heroes", "url": "https://x/sealed"}],
+        [{"name": "ETB Ascended Heroes", "type": "price", "url": "https://x/sealed"}],
     )
 
     (card,) = load_cards(path)
@@ -131,7 +131,7 @@ def test_missing_conditions_loads_as_sealed_product(tmp_path: Path) -> None:
 def test_empty_conditions_loads_as_sealed_product(tmp_path: Path) -> None:
     path = _write_cards(
         tmp_path,
-        [{"name": "ETB Ascended Heroes", "conditions": [], "url": "https://x/sealed"}],
+        [{"name": "ETB Ascended Heroes", "type": "price", "conditions": [], "url": "https://x/sealed"}],
     )
 
     (card,) = load_cards(path)
@@ -140,10 +140,82 @@ def test_empty_conditions_loads_as_sealed_product(tmp_path: Path) -> None:
     assert card.conditions == ()
 
 
+def test_new_product_entry_loads_as_catalog_watch(tmp_path: Path) -> None:
+    path = _write_cards(
+        tmp_path,
+        [
+            {
+                "name": "Shisui Pré-venda",
+                "type": "new_product",
+                "url": "https://www.shisuistore.com.br/pre-venda/",
+            }
+        ],
+    )
+
+    (watch,) = load_cards(path)
+
+    assert watch.is_catalog is True
+    assert watch.is_sealed is False
+    assert watch.conditions == ()
+
+
+def test_new_product_entry_ignores_conditions(tmp_path: Path) -> None:
+    path = _write_cards(
+        tmp_path,
+        [{"name": "W", "type": "new_product", "conditions": "nonsense", "url": "https://x/w"}],
+    )
+
+    (watch,) = load_cards(path)
+
+    assert watch.is_catalog is True
+    assert watch.conditions == ()
+
+
+def test_price_entries_are_not_catalog_watches(tmp_path: Path) -> None:
+    path = _write_cards(
+        tmp_path,
+        [
+            {"name": "Card", "type": "price", "conditions": ["NM"], "url": "https://x/a"},
+            {"name": "Sealed", "type": "price", "url": "https://x/b"},
+        ],
+    )
+
+    card, sealed = load_cards(path)
+
+    assert (card.is_catalog, card.is_sealed) == (False, False)
+    assert (sealed.is_catalog, sealed.is_sealed) == (False, True)
+
+
+def test_type_is_normalised(tmp_path: Path) -> None:
+    path = _write_cards(
+        tmp_path, [{"name": "X", "type": " Price ", "conditions": ["NM"], "url": "https://x/a"}]
+    )
+
+    (card,) = load_cards(path)
+
+    assert card.entry_type == "price"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"name": "X", "conditions": ["NM"], "url": "https://x/a"},
+        {"name": "X", "type": "", "conditions": ["NM"], "url": "https://x/a"},
+        {"name": "X", "type": "prices", "conditions": ["NM"], "url": "https://x/a"},
+        {"name": "X", "type": 123, "conditions": ["NM"], "url": "https://x/a"},
+        {"name": "X", "type": None, "conditions": ["NM"], "url": "https://x/a"},
+    ],
+)
+def test_missing_or_unknown_type_aborts(tmp_path: Path, entry: dict[str, object]) -> None:
+    path = _write_cards(tmp_path, [entry])
+    with pytest.raises(ConfigError, match="'type'"):
+        load_cards(path)
+
+
 def test_unknown_card_keys_ignored(tmp_path: Path) -> None:
     path = _write_cards(
         tmp_path,
-        [{"name": "X", "conditions": ["NM"], "url": "https://x/a", "future_field": 99}],
+        [{"name": "X", "type": "price", "conditions": ["NM"], "url": "https://x/a", "future_field": 99}],
     )
     cards = load_cards(path)
     assert cards[0].name == "X"
@@ -174,20 +246,20 @@ def test_empty_array_aborts(tmp_path: Path) -> None:
 
 
 def test_missing_url_aborts(tmp_path: Path) -> None:
-    path = _write_cards(tmp_path, [{"name": "X", "conditions": ["NM"]}])
+    path = _write_cards(tmp_path, [{"name": "X", "type": "price", "conditions": ["NM"]}])
     with pytest.raises(ConfigError, match="url"):
         load_cards(path)
 
 
 def test_non_list_conditions_aborts(tmp_path: Path) -> None:
-    path = _write_cards(tmp_path, [{"name": "X", "conditions": "NM", "url": "https://x/a"}])
+    path = _write_cards(tmp_path, [{"name": "X", "type": "price", "conditions": "NM", "url": "https://x/a"}])
     with pytest.raises(ConfigError, match="conditions"):
         load_cards(path)
 
 
 def test_unknown_condition_aborts(tmp_path: Path) -> None:
     path = _write_cards(
-        tmp_path, [{"name": "X", "conditions": ["MINT"], "url": "https://x/a"}]
+        tmp_path, [{"name": "X", "type": "price", "conditions": ["MINT"], "url": "https://x/a"}]
     )
     with pytest.raises(ConfigError, match="unknown condition"):
         load_cards(path)
@@ -198,7 +270,7 @@ def test_unknown_condition_aborts(tmp_path: Path) -> None:
 
 def test_load_config_end_to_end(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     path = _write_cards(
-        tmp_path, [{"name": "X", "conditions": ["NM"], "url": "https://x/a"}]
+        tmp_path, [{"name": "X", "type": "price", "conditions": ["NM"], "url": "https://x/a"}]
     )
     _set_env(monkeypatch, CARDS_CONFIG_PATH=str(path))
     config = load_config(_NO_ENV)

@@ -9,11 +9,15 @@ from pathlib import Path
 import httpx
 import pytest
 
+from models.product import Product
+from services.catalog import CHANGE_NEW, CHANGE_RESTOCK, Change
 from services.config import AppConfig
 from services.notifier import (
+    MAX_CHANGE_LINES,
     DiscordNotifier,
     format_all_time_low,
     format_brl,
+    format_catalog_updates,
     format_initial_baseline,
     format_sprite_decode_alert,
 )
@@ -217,3 +221,80 @@ def test_context_manager_closes_client_and_close_is_idempotent() -> None:
 
     notifier.close()
     assert client.is_closed
+
+
+# --- Catalog watch (FRD §21) ----------------------------------------------
+
+
+def _change(kind: str, *, name: str = "Booster Box Winterspell", price: float | None = 899.99,
+            in_stock: bool = True, product_id: str = "1") -> Change:
+    return Change(
+        kind=kind,
+        product=Product(
+            product_id=product_id,
+            name=name,
+            url=f"https://shisuistore.com.br/produtos/{product_id}/",
+            price=price,
+            in_stock=in_stock,
+        ),
+    )
+
+
+def test_format_catalog_updates_batches_new_and_restock_lines() -> None:
+    message = format_catalog_updates(
+        watch_name="Shisui Pré-venda",
+        changes=[
+            _change(CHANGE_NEW, name="Box Coleção", price=99.99, in_stock=False, product_id="1"),
+            _change(CHANGE_RESTOCK, product_id="2"),
+        ],
+    )
+
+    assert message == (
+        "🆕 Shisui Pré-venda — 2 update(s)\n"
+        "• NEW: Box Coleção - R$99,99 - Esgotado - https://shisuistore.com.br/produtos/1/\n"
+        "• RESTOCK: Booster Box Winterspell - R$899,99 - Em estoque - "
+        "https://shisuistore.com.br/produtos/2/"
+    )
+
+
+def test_format_catalog_updates_renders_unknown_price() -> None:
+    message = format_catalog_updates(
+        watch_name="Shisui", changes=[_change(CHANGE_NEW, price=None)]
+    )
+    assert " - — - " in message
+
+
+def test_format_catalog_updates_truncates_large_batches_under_discord_limit() -> None:
+    changes = [_change(CHANGE_NEW, product_id=str(index)) for index in range(25)]
+
+    message = format_catalog_updates(watch_name="Shisui", changes=changes)
+
+    lines = message.splitlines()
+    assert lines[0] == "🆕 Shisui — 25 update(s)"
+    assert len(lines) == MAX_CHANGE_LINES + 2  # header + capped lines + summary
+    assert lines[-1] == "• … and 5 more"
+    assert len(message) < 2000
+
+
+def test_notify_catalog_updates_sends_exactly_one_webhook_call() -> None:
+    handler = QueueHandler([httpx.Response(204)])
+    notifier = _notifier(handler)
+
+    delivered = notifier.notify_catalog_updates(
+        watch_name="Shisui Pré-venda",
+        changes=[_change(CHANGE_NEW, product_id="1"), _change(CHANGE_RESTOCK, product_id="2")],
+    )
+
+    assert delivered is True
+    assert len(handler.requests) == 1
+    content = _posted_json(handler.requests[0])["content"]
+    assert content.startswith("🆕 Shisui Pré-venda — 2 update(s)")
+    assert "• NEW:" in content and "• RESTOCK:" in content
+
+
+def test_notify_catalog_updates_sends_nothing_without_changes() -> None:
+    handler = QueueHandler([])
+    notifier = _notifier(handler)
+
+    assert notifier.notify_catalog_updates(watch_name="Shisui", changes=[]) is False
+    assert handler.requests == []
