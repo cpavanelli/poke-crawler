@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from models.card import Card
+from models.card import TYPE_NEW_PRODUCT, TYPE_PRICE, VALID_TYPES, Card
 
 # Condition acronyms recognised by the LigaPokemon parser (FRD §10).
 VALID_CONDITIONS = frozenset({"M", "NM", "SP", "MP", "HP", "D"})
@@ -95,9 +95,12 @@ def load_app_config(env_path: str | os.PathLike[str] | None = None) -> AppConfig
 def load_cards(path: Path) -> tuple[Card, ...]:
     """Load and validate the card list from a JSON file (FRD §3).
 
-    Unknown keys on each card object are ignored for forward compatibility.
-    Entries without ``conditions`` or with an empty ``conditions`` array are
-    sealed products and track one SEALED price.
+    Every entry must carry a ``type`` of ``"price"`` or ``"new_product"``; a
+    missing, empty, or unknown ``type`` is invalid configuration (FRD §3, §12).
+    Within ``"price"``, entries without ``conditions`` or with an empty
+    ``conditions`` array are sealed products and track one SEALED price.
+    ``"new_product"`` entries are catalog watches and have no conditions
+    (FRD §21). Unknown keys on each entry are ignored for forward compatibility.
 
     Raises:
         ConfigError: If the file is missing, not valid JSON, not a non-empty
@@ -122,7 +125,7 @@ def load_cards(path: Path) -> tuple[Card, ...]:
 
 
 def _parse_card(entry: object, index: int) -> Card:
-    """Validate one raw card object and build a :class:`Card` (FRD §3)."""
+    """Validate one raw entry object and build a :class:`Card` (FRD §3)."""
     if not isinstance(entry, dict):
         raise ConfigError(f"Card at index {index} must be a JSON object")
 
@@ -132,6 +135,17 @@ def _parse_card(entry: object, index: int) -> Card:
         raise ConfigError(f"Card at index {index} is missing a non-empty 'name'")
     if not isinstance(url, str) or not url.strip():
         raise ConfigError(f"Card {name!r} is missing a non-empty 'url'")
+
+    entry_type = _parse_entry_type(entry.get("type"), name)
+    if entry_type == TYPE_NEW_PRODUCT:
+        # A catalog watch tracks which products exist, not prices, so any
+        # 'conditions' present is ignored (FRD §3, §21).
+        return Card(
+            name=name.strip(),
+            conditions=(),
+            url=url.strip(),
+            entry_type=TYPE_NEW_PRODUCT,
+        )
 
     if "conditions" not in entry:
         return Card(name=name.strip(), conditions=(), url=url.strip(), is_sealed=True)
@@ -155,7 +169,23 @@ def _parse_card(entry: object, index: int) -> Card:
         normalized.append(acronym)
 
     # Only known fields are read, so any extra JSON keys are ignored (FRD §3).
-    return Card(name=name.strip(), conditions=tuple(normalized), url=url.strip())
+    return Card(
+        name=name.strip(),
+        conditions=tuple(normalized),
+        url=url.strip(),
+        entry_type=TYPE_PRICE,
+    )
+
+
+def _parse_entry_type(raw: object, name: str) -> str:
+    """Validate the mandatory entry 'type' field (FRD §3, §12)."""
+    if isinstance(raw, str):
+        entry_type = raw.strip().lower()
+        if entry_type in VALID_TYPES:
+            return entry_type
+
+    valid = ", ".join(repr(value) for value in sorted(VALID_TYPES))
+    raise ConfigError(f"Card {name!r} has invalid 'type' {raw!r}; valid: {valid}")
 
 
 def _require_str(name: str) -> str:

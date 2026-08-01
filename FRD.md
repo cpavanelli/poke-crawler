@@ -13,7 +13,9 @@ The Pokémon Card Price Watcher is a lightweight monitoring application that per
 
 It also monitors **sealed products** (e.g. Elite Trainer Boxes), which are tracked as a single lowest price with no per-condition breakdown (see §5).
 
-Initial implementation targets LigaPokemon.
+A second, distinct monitor type — the **New-Product (Catalog) Watch** (§21) — watches a marketplace collection/listing URL and notifies when a new product is listed or a known product is restocked. It tracks *which products exist* on a page rather than the price of a known product.
+
+Initial implementation targets LigaPokemon (price watch) and Shisui Store / Nuvemshop (catalog watch).
 
 The architecture must be extensible to support additional marketplaces in the future, such as MYP Cards.
 
@@ -35,17 +37,30 @@ The architecture must be extensible to support additional marketplaces in the fu
 
 # 3. Configuration
 
+## Entry Type
+
+Every configuration entry has a **mandatory** `type` field that selects the monitor:
+
+- `"price"` — the price watcher (card or sealed, this section and §5).
+- `"new_product"` — the New-Product (Catalog) Watch (§21).
+
+`type` is required and must be one of the known values. A missing, empty, or
+unrecognised `type` is invalid configuration and aborts startup (§12). Unknown
+JSON *properties* (not values) are still ignored for forward compatibility.
+
 ## Card Configuration
 
 ```json
 [
   {
     "name": "Mega Gengar",
+    "type": "price",
     "conditions": ["NM"],
     "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Gengar+ex%20(284/217)&show=1&ed=ASC&num=284"
   },
   {
     "name": "Mega Charizard X",
+    "type": "price",
     "conditions": ["NM", "SP"],
     "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Charizard+X+ex%20(125/094)&show=1&ed=PFL&num=125"
   }
@@ -54,22 +69,42 @@ The architecture must be extensible to support additional marketplaces in the fu
 
 ### Sealed Products
 
-A sealed product is configured by **omitting the `conditions` array**. Its absence is the marker for sealed mode; no new field is introduced. A sealed product is tracked as a single lowest price (§5), so it has no conditions to list.
+Within `type: "price"`, a sealed product is configured by **omitting the `conditions` array**. Its absence is the marker for sealed mode; no extra field is introduced. A sealed product is tracked as a single lowest price (§5), so it has no conditions to list.
 
 ```json
 [
   {
     "name": "ETB - Megaevolution Series - Ascended Heroes",
+    "type": "price",
     "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=135115&prod=..."
+  }
+]
+```
+
+### New-Product (Catalog) Watch
+
+A catalog watch is configured with `type: "new_product"` and a collection/listing
+URL. It has no `conditions` (any present are ignored). See §21 for behaviour.
+
+```json
+[
+  {
+    "name": "Shisui Pré-venda",
+    "type": "new_product",
+    "url": "https://www.shisuistore.com.br/pre-venda/"
   }
 ]
 ```
 
 Validation:
 
-- If `conditions` is present, it must be a non-empty array of valid card condition acronyms (card mode).
-- If `conditions` is absent (or empty), the entry is a sealed product (sealed mode).
-- Card identity is still `SHA256(url)` (§9), unaffected by mode.
+- `type` is mandatory and must be `"price"` or `"new_product"`. Missing, empty, or
+  unknown `type` aborts startup (§12).
+- For `type: "price"`: if `conditions` is present it must be a non-empty array of
+  valid card condition acronyms (card mode); if absent (or empty), the entry is a
+  sealed product (sealed mode).
+- For `type: "new_product"`: `conditions` is not used.
+- Entry identity is `SHA256(url)` (§9) in every mode.
 
 Unknown JSON properties must be ignored for forward compatibility.
 
@@ -304,6 +339,45 @@ CREATE TABLE scan_errors (
 );
 ```
 
+## catalog_watches
+
+Used only by the New-Product (Catalog) Watch (§21). Records that a watch has
+completed a scan, which is what distinguishes "never scanned" (seed silently)
+from "scanned, and the page currently lists nothing". A collection page can
+legitimately be empty between drops, so the seed decision must not be inferred
+from the absence of product rows.
+
+```sql
+CREATE TABLE catalog_watches (
+    watch_id         TEXT PRIMARY KEY,   -- SHA256(collection url)
+    first_scanned_at TEXT NOT NULL,
+    last_scanned_at  TEXT NOT NULL
+);
+```
+
+## collection_products
+
+Used only by the New-Product (Catalog) Watch (§21). Records the set of products
+ever seen on a watched collection URL so that new products and restocks can be
+detected. The price-watcher tables above are untouched by the catalog watch.
+
+```sql
+CREATE TABLE collection_products (
+    watch_id      TEXT NOT NULL,       -- SHA256(collection url)
+    product_id    TEXT NOT NULL,       -- store numeric product id (identity)
+    product_name  TEXT NOT NULL,
+    product_url   TEXT NOT NULL,
+    price         REAL,                -- display-only, refreshed each scan
+    in_stock      INTEGER NOT NULL,    -- 0 / 1
+    first_seen_at TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL,
+    PRIMARY KEY (watch_id, product_id)
+);
+```
+
+Rows are never deleted: a product that disappears from the page and later returns
+is not re-reported as new (§21).
+
 ---
 
 # 9. Card Identification
@@ -481,11 +555,41 @@ Example `lowest_prices` output (conditions = `["NM", "SP"]`):
 ]
 ```
 
+## Catalog Parser Interface
+
+The New-Product (Catalog) Watch (§21) is a **distinct parser capability**, not a
+special case inside the price parser. A catalog parser turns a collection page's
+raw HTML into the full set of products present on it:
+
+```python
+can_handle(url) -> bool
+parse_catalog(html) -> list[Product]
+```
+
+where `Product(product_id, name, url, price, in_stock)`. `product_id` is the
+store's stable identifier (§21); `price` is display-only (§5); `in_stock` is a
+boolean. The parser returns every product on the page and does not know about
+stored state, new-vs-restock logic, or notifications.
+
+The set-difference reduction is marketplace-agnostic and lives outside the parser
+hierarchy as a pure function (sibling to `lowest_prices`):
+
+```python
+detect_changes(current, known) -> list[Change]
+```
+
+It compares the freshly parsed products against the stored product state and
+returns the new and restocked products (§21). The scanner branches on the entry
+`type`: price mode composes `parse_listings` + `lowest_prices` /
+`lowest_sealed_price`; catalog mode composes `parse_catalog` + `detect_changes`.
+Parsers never branch on mode.
+
 ## Initial Parsers
 
 Version 1:
 
-- LigaPokemonParser
+- LigaPokemonParser (price watch)
+- NuvemshopParser (catalog watch — Shisui Store)
 
 Future:
 
@@ -518,6 +622,11 @@ Behavior:
 | Discord failure | Log and continue |
 | 403 | Stop current cycle |
 | 429 | Stop current cycle |
+
+Missing, empty, or unknown entry `type` (§3) is invalid configuration and aborts
+startup. A catalog scan that yields no new/restocked products is not an error —
+no notification is sent and the run continues (analogous to "no matching
+condition").
 
 ---
 
@@ -652,6 +761,7 @@ card-watcher/
 │   ├── base.py
 │   ├── ligapokemon_parser.py
 │   ├── sprite_decoder.py
+│   ├── nuvemshop.py
 │   └── mypcards.py
 │
 ├── services/
@@ -660,11 +770,13 @@ card-watcher/
 │   ├── storage.py
 │   ├── fetcher.py
 │   ├── pricing.py
+│   ├── catalog.py
 │   └── config.py
 │
 ├── models/
 │   ├── card.py
 │   ├── listing.py
+│   ├── product.py
 │   └── price_result.py
 │
 ├── tools/
@@ -687,7 +799,106 @@ card-watcher/
 
 ---
 
-# 21. Future Enhancements
+# 21. New-Product (Catalog) Watch
+
+## Purpose
+
+A second monitor type that watches a marketplace **collection / listing URL** and
+alerts when the set of products on that page changes in an actionable way. Unlike
+the price watcher (which tracks the lowest price of a *known* product), the catalog
+watch tracks **which products exist** on a page and notifies when a new product is
+listed or a known product is restocked. Initial target: Shisui Store pre-sale page
+(`https://www.shisuistore.com.br/pre-venda/`), which runs on Nuvemshop /
+Tiendanube.
+
+## Mode Selection
+
+The monitor is selected by the mandatory `type` field (§3): `type: "new_product"`
+is a catalog watch; `type: "price"` is the price watcher. The scanner branches on
+`type` (§11); parsers do not.
+
+## Page Fetch & Parsing
+
+A standard HTTP GET with a browser User-Agent returns 200 with fully
+server-rendered HTML — product IDs, names, URLs, prices, and stock state are all
+present in the source. No JavaScript execution or headless browser is required.
+
+**Only page 1 of the collection is fetched** — a single request per watch.
+Pagination is intentionally *not* followed (anti-abuse, §17); newly listed
+products surface on page 1.
+
+For Nuvemshop / Tiendanube each product is a `div.js-item-product` element:
+
+| Field | Source |
+|---|---|
+| `product_id` | `data-product-id` attribute (stable numeric store ID) |
+| `name` | `.js-item-name` text |
+| `url` | product `/produtos/<slug>/` link |
+| `price` | `.js-price-display` / `data-store="product-item-price-…"` |
+| `in_stock` | absence of the `noStock` / "Esgotado" out-of-stock markers |
+
+## Product Identity
+
+A product is identified by `product_id` (the store's numeric ID). Name, URL, and
+price are display-only metadata and may change without changing identity. The
+watch itself is identified by `watch_id = SHA256(url)` (same formula as `card_id`,
+§9).
+
+## Alert Rules
+
+- **New product** — a `product_id` never previously seen for that `watch_id`.
+  This fires even if the product is already sold out (a newly listed pre-order is
+  itself the signal).
+- **Restock** — a known product transitioning **sold-out → in-stock**.
+- **No alert** for: in-stock → sold-out, price changes, or a product disappearing
+  from the page.
+- **First scan** of a watch (no `catalog_watches` row for that `watch_id`):
+  record every current product as the baseline with **no notifications** (silent
+  seed), analogous to `SEND_INITIAL_BASELINE_NOTIFICATION=false`. A watch whose
+  page was empty at seed time is still seeded, so the next product listed is
+  reported as new.
+- **Batching** — all new and restocked products found in a single scan of one URL
+  are reported in **one consolidated Discord message**, never one message per
+  product.
+
+## Product State Persistence
+
+Known products are stored in `collection_products` (§8). Rows are **never
+deleted**: a product that disappears from the page and later returns is not
+re-reported as new. On each scan, `last_seen_at` is updated for products present,
+and `price` / `in_stock` are refreshed. New rows record `first_seen_at`.
+
+## Notification Format
+
+One webhook call per watch per scan, sent only when there is at least one change:
+
+```text
+🆕 [watch name] — [N] update(s)
+• NEW: [product name] - [price] - [stock] - [url]
+• RESTOCK: [product name] - [price] - [stock] - [url]
+```
+
+Each line is prefixed `NEW:` or `RESTOCK:`. Price is display-only and shipping is
+still ignored (§5). If a scan yields no changes, no notification is sent.
+
+## Architecture
+
+The catalog watch is a distinct parser capability (§11): catalog parsers implement
+`can_handle(url)` + `parse_catalog(html) -> list[Product]`, and the set-difference
+reduction is the marketplace-agnostic pure function
+`detect_changes(current, known) -> list[Change]`. The **NuvemshopParser**
+implements the contract for Shisui Store.
+
+## Error Handling & Anti-Abuse
+
+Identical policies to the price watcher: one request at a time; `REQUEST_DELAY_SECONDS`
+between watches; retry transient failures per §13; HTTP 403 / 429 stop the cycle
+(§12, §17); parser and network failures log and continue. Page-1-only keeps a
+catalog watch to a single request per scan.
+
+---
+
+# 22. Future Enhancements
 
 - MYP Cards support
 - Telegram notifications

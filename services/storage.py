@@ -1,11 +1,14 @@
-"""SQLite storage helpers for baselines, scan results, and scan errors (FRD §8)."""
+"""SQLite storage helpers for baselines, scan results, errors, and catalog state (FRD §8)."""
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from models.product import Product
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,6 +65,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             error_type TEXT NOT NULL,
             error_message TEXT,
             occurred_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_watches (
+            watch_id TEXT PRIMARY KEY,
+            first_scanned_at TEXT NOT NULL,
+            last_scanned_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS collection_products (
+            watch_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            product_url TEXT NOT NULL,
+            price REAL,
+            in_stock INTEGER NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY(watch_id, product_id)
         );
         """
     )
@@ -160,6 +181,87 @@ def insert_scan_error(
         VALUES (?, ?, ?, ?, ?)
         """,
         (card_id, url, error_type, error_message, occurred_at),
+    )
+    conn.commit()
+
+
+def is_watch_seeded(conn: sqlite3.Connection, watch_id: str) -> bool:
+    """Whether this catalog watch has completed a scan before (FRD §21).
+
+    Tracked separately from the product rows: a collection page can legitimately
+    be empty, and "no products stored" must not be mistaken for "never scanned"
+    or the first product to appear would be seeded silently instead of alerting.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM catalog_watches WHERE watch_id = ?", (watch_id,)
+    ).fetchone()
+    return row is not None
+
+
+def mark_watch_scanned(conn: sqlite3.Connection, watch_id: str, *, now: str) -> None:
+    """Record that a catalog watch completed a scan, preserving the first one."""
+    conn.execute(
+        """
+        INSERT INTO catalog_watches (watch_id, first_scanned_at, last_scanned_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(watch_id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at
+        """,
+        (watch_id, now, now),
+    )
+    conn.commit()
+
+
+def get_known_stock(conn: sqlite3.Connection, watch_id: str) -> dict[str, bool]:
+    """Return ``product_id -> in_stock`` for one catalog watch (FRD §21)."""
+    rows = conn.execute(
+        "SELECT product_id, in_stock FROM collection_products WHERE watch_id = ?",
+        (watch_id,),
+    ).fetchall()
+    return {row["product_id"]: bool(row["in_stock"]) for row in rows}
+
+
+def upsert_collection_products(
+    conn: sqlite3.Connection,
+    watch_id: str,
+    products: Sequence[Product],
+    *,
+    now: str,
+) -> None:
+    """Insert new products and refresh known ones for a watch (FRD §8, §21).
+
+    ``first_seen_at`` is preserved on conflict, so a product that disappears
+    and later returns keeps its original first sighting. Rows are never deleted.
+    """
+    if not products:
+        return
+
+    conn.executemany(
+        """
+        INSERT INTO collection_products (
+            watch_id, product_id, product_name, product_url, price, in_stock,
+            first_seen_at, last_seen_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(watch_id, product_id) DO UPDATE SET
+            product_name = excluded.product_name,
+            product_url = excluded.product_url,
+            price = excluded.price,
+            in_stock = excluded.in_stock,
+            last_seen_at = excluded.last_seen_at
+        """,
+        [
+            (
+                watch_id,
+                product.product_id,
+                product.name,
+                product.url,
+                product.price,
+                int(product.in_stock),
+                now,
+                now,
+            )
+            for product in products
+        ],
     )
     conn.commit()
 

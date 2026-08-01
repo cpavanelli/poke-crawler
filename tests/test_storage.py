@@ -5,14 +5,19 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from models.product import Product
 from services.storage import (
     BaselineRow,
     connect,
     get_baseline,
+    get_known_stock,
     init_db,
     insert_scan_error,
     insert_scan_result,
+    is_watch_seeded,
+    mark_watch_scanned,
     upsert_baseline,
+    upsert_collection_products,
 )
 
 
@@ -202,5 +207,150 @@ def test_insert_scan_error_accepts_null_values(tmp_path: Path) -> None:
         assert row["id"] == 1
         assert row["card_id"] is None
         assert row["error_message"] is None
+    finally:
+        conn.close()
+
+
+# --- collection_products (catalog watch, FRD §8, §21) ---------------------
+
+
+def _product(product_id: str, *, name: str = "Produto", in_stock: bool = True,
+             price: float | None = 99.99) -> Product:
+    return Product(
+        product_id=product_id,
+        name=name,
+        url=f"https://shisuistore.com.br/produtos/{product_id}/",
+        price=price,
+        in_stock=in_stock,
+    )
+
+
+def _rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT watch_id, product_id, product_name, product_url, price, in_stock,
+               first_seen_at, last_seen_at
+        FROM collection_products
+        ORDER BY watch_id, product_id
+        """
+    ).fetchall()
+
+
+def test_init_db_is_idempotent_and_seeds_an_empty_catalog_watch(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        init_db(conn)  # second call must not raise or drop data
+        assert get_known_stock(conn, "watch-1") == {}
+        assert is_watch_seeded(conn, "watch-1") is False
+    finally:
+        conn.close()
+
+
+def test_mark_watch_scanned_is_independent_of_stored_products(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        first = "2026-07-31T09:00:00-03:00"
+        later = "2026-08-01T09:00:00-03:00"
+
+        # A watch whose page was empty: seeded, but with no product rows.
+        mark_watch_scanned(conn, "watch-1", now=first)
+        assert is_watch_seeded(conn, "watch-1") is True
+        assert get_known_stock(conn, "watch-1") == {}
+        assert is_watch_seeded(conn, "watch-2") is False
+
+        mark_watch_scanned(conn, "watch-1", now=later)
+        row = conn.execute(
+            "SELECT first_scanned_at, last_scanned_at FROM catalog_watches WHERE watch_id = ?",
+            ("watch-1",),
+        ).fetchone()
+        assert (row["first_scanned_at"], row["last_scanned_at"]) == (first, later)
+    finally:
+        conn.close()
+
+
+def test_upsert_collection_products_seeds_rows(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        now = "2026-07-31T09:00:00-03:00"
+        upsert_collection_products(
+            conn,
+            "watch-1",
+            [_product("a"), _product("b", in_stock=False, price=None)],
+            now=now,
+        )
+
+        rows = _rows(conn)
+        assert [(row["product_id"], row["in_stock"], row["price"]) for row in rows] == [
+            ("a", 1, 99.99),
+            ("b", 0, None),
+        ]
+        assert all(row["first_seen_at"] == now and row["last_seen_at"] == now for row in rows)
+        assert get_known_stock(conn, "watch-1") == {"a": True, "b": False}
+    finally:
+        conn.close()
+
+
+def test_upsert_refreshes_state_but_preserves_first_seen_at(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        first = "2026-07-31T09:00:00-03:00"
+        later = "2026-08-01T09:00:00-03:00"
+        upsert_collection_products(conn, "watch-1", [_product("a", in_stock=False)], now=first)
+
+        upsert_collection_products(
+            conn,
+            "watch-1",
+            [_product("a", name="Novo nome", in_stock=True, price=80.0)],
+            now=later,
+        )
+
+        (row,) = _rows(conn)
+        assert row["first_seen_at"] == first
+        assert row["last_seen_at"] == later
+        assert row["product_name"] == "Novo nome"
+        assert row["price"] == 80.0
+        assert row["in_stock"] == 1
+    finally:
+        conn.close()
+
+
+def test_products_absent_from_a_later_scan_are_never_deleted(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        first = "2026-07-31T09:00:00-03:00"
+        later = "2026-08-01T09:00:00-03:00"
+        upsert_collection_products(conn, "watch-1", [_product("a"), _product("b")], now=first)
+
+        upsert_collection_products(conn, "watch-1", [_product("a")], now=later)
+        upsert_collection_products(conn, "watch-1", [_product("b")], now="2026-08-02T09:00:00-03:00")
+
+        rows = {row["product_id"]: row for row in _rows(conn)}
+        assert set(rows) == {"a", "b"}
+        # 'b' disappeared and came back: still its original first sighting.
+        assert rows["b"]["first_seen_at"] == first
+        assert rows["b"]["last_seen_at"] == "2026-08-02T09:00:00-03:00"
+    finally:
+        conn.close()
+
+
+def test_watches_keep_independent_rows_for_the_same_product_id(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        now = "2026-07-31T09:00:00-03:00"
+        upsert_collection_products(conn, "watch-1", [_product("a", in_stock=True)], now=now)
+        upsert_collection_products(conn, "watch-2", [_product("a", in_stock=False)], now=now)
+
+        assert get_known_stock(conn, "watch-1") == {"a": True}
+        assert get_known_stock(conn, "watch-2") == {"a": False}
+        assert len(_rows(conn)) == 2
+    finally:
+        conn.close()
+
+
+def test_empty_product_list_is_a_no_op(tmp_path: Path) -> None:
+    conn = _open_db(tmp_path)
+    try:
+        upsert_collection_products(conn, "watch-1", [], now="2026-07-31T09:00:00-03:00")
+        assert _rows(conn) == []
     finally:
         conn.close()

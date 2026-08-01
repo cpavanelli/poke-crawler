@@ -9,8 +9,9 @@ from pathlib import Path
 
 import httpx
 
-from models.card import Card
+from models.card import TYPE_NEW_PRODUCT, Card
 from services import storage
+from services.catalog import CHANGE_NEW, CHANGE_RESTOCK
 from services.fetcher import RETRY_DELAY_SECONDS, HttpFetcher
 from services.notifier import DiscordNotifier
 from services.scanner import Scanner
@@ -795,5 +796,400 @@ def test_precocss_fixture_decodes_through_fetcher_and_real_parser() -> None:
         ]
         assert storage.get_baseline(conn, card.card_id, "NM").lowest_price == 843.0
         assert sleeps == [2]
+    finally:
+        conn.close()
+
+
+# --- New-Product (Catalog) Watch (FRD §21) --------------------------------
+
+SHISUI_URL = "https://www.shisuistore.com.br/pre-venda/"
+PRE_VENDA_HTML = (
+    Path(__file__).parent / "fixtures" / "shisui" / "pre_venda.html"
+).read_text(encoding="utf-8")
+PRE_VENDA_ID = "357460215"
+
+
+def _watch(name: str = "Shisui Pré-venda", url: str = SHISUI_URL) -> Card:
+    return Card(name=name, conditions=(), url=url, entry_type=TYPE_NEW_PRODUCT)
+
+
+def _catalog_html(*products: tuple[str, str, bool]) -> str:
+    """Minimal Nuvemshop-shaped page from (product_id, name, in_stock) triples."""
+    blocks = []
+    for product_id, name, in_stock in products:
+        availability = "InStock" if in_stock else "OutOfStock"
+        hidden = "display:none;" if in_stock else ""
+        blocks.append(
+            f"""
+            <div class="js-item-product" data-product-id="{product_id}">
+              <a class="item-link" href="https://shisuistore.com.br/produtos/{product_id}/"></a>
+              <div class="js-item-name">{name}</div>
+              <span class="js-price-display" data-product-price="9999">R$99,99</span>
+              <div class="js-stock-label" data-label="Esgotado" style="{hidden}">Esgotado</div>
+              <script type="application/ld+json">
+                {{"@type":"Product","offers":{{"availability":"https://schema.org/{availability}"}}}}
+              </script>
+            </div>
+            """
+        )
+    return f"<html><body>{''.join(blocks)}</body></html>"
+
+
+def _catalog_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT watch_id, product_id, product_name, price, in_stock, first_seen_at, last_seen_at
+        FROM collection_products
+        ORDER BY product_id
+        """
+    ).fetchall()
+
+
+class SpyCatalogNotifier(SpyNotifier):
+    def __init__(self) -> None:
+        super().__init__()
+        self.catalog_updates: list[dict[str, object]] = []
+
+    def notify_catalog_updates(self, *, watch_name: str, changes: object) -> bool:
+        self.catalog_updates.append({"watch_name": watch_name, "changes": list(changes)})
+        return True
+
+
+def test_catalog_first_scan_seeds_silently() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler({watch.url: [httpx.Response(200, text=PRE_VENDA_HTML)]})
+        scanner = _scanner(conn, handler, notifier)
+
+        outcome = scanner.scan_catalog(watch)
+
+        rows = _catalog_rows(conn)
+        assert [(row["product_id"], row["in_stock"], row["price"]) for row in rows] == [
+            (PRE_VENDA_ID, 0, 99.99)
+        ]
+        assert rows[0]["watch_id"] == watch.card_id
+        assert rows[0]["first_seen_at"] == FIXED_NOW
+        assert notifier.catalog_updates == []
+        assert outcome.catalog_changes == 0
+        assert outcome.error_type is None
+        assert _count(conn, "scan_errors") == 0
+        assert len(handler.requests) == 1  # page 1 only, one request per watch
+    finally:
+        conn.close()
+
+
+def test_catalog_unchanged_rescan_sends_nothing_and_refreshes_last_seen() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        notifier = SpyCatalogNotifier()
+        later = "2026-06-13T09:10:11-03:00"
+        clock = iter([FIXED_NOW, later])
+        handler = RouteHandler({watch.url: [httpx.Response(200, text=PRE_VENDA_HTML)] * 2})
+        scanner = _scanner(conn, handler, notifier, clock=lambda: next(clock))
+
+        scanner.scan_catalog(watch)
+        outcome = scanner.scan_catalog(watch)
+
+        (row,) = _catalog_rows(conn)
+        assert row["first_seen_at"] == FIXED_NOW
+        assert row["last_seen_at"] == later
+        assert notifier.catalog_updates == []
+        assert outcome.catalog_changes == 0
+    finally:
+        conn.close()
+
+
+def test_catalog_new_and_restocked_products_send_one_consolidated_message() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        first_html = _catalog_html((PRE_VENDA_ID, "Box Coleção", False))
+        second_html = _catalog_html(
+            (PRE_VENDA_ID, "Box Coleção", True),
+            ("999", "Booster Box Winterspell", True),
+        )
+        notifier = SpyCatalogNotifier()
+        later = "2026-06-13T09:10:11-03:00"
+        clock = iter([FIXED_NOW, later])
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=first_html),
+                    httpx.Response(200, text=second_html),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier, clock=lambda: next(clock))
+
+        scanner.scan_catalog(watch)
+        outcome = scanner.scan_catalog(watch)
+
+        assert len(notifier.catalog_updates) == 1
+        call = notifier.catalog_updates[0]
+        assert call["watch_name"] == "Shisui Pré-venda"
+        assert [(change.kind, change.product.product_id) for change in call["changes"]] == [
+            (CHANGE_RESTOCK, PRE_VENDA_ID),
+            (CHANGE_NEW, "999"),
+        ]
+        assert outcome.catalog_changes == 2
+
+        rows = {row["product_id"]: row for row in _catalog_rows(conn)}
+        assert rows[PRE_VENDA_ID]["in_stock"] == 1
+        assert rows[PRE_VENDA_ID]["first_seen_at"] == FIXED_NOW  # preserved
+        assert rows["999"]["first_seen_at"] == later
+    finally:
+        conn.close()
+
+
+def test_catalog_sell_out_is_not_reported_but_is_recorded() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_catalog_html(("1", "Produto", True))),
+                    httpx.Response(200, text=_catalog_html(("1", "Produto", False))),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        scanner.scan_catalog(watch)
+        outcome = scanner.scan_catalog(watch)
+
+        assert notifier.catalog_updates == []
+        assert outcome.catalog_changes == 0
+        assert _catalog_rows(conn)[0]["in_stock"] == 0
+    finally:
+        conn.close()
+
+
+def test_catalog_reappearing_product_is_not_reported_as_new() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_catalog_html(("1", "Produto", False))),
+                    httpx.Response(200, text=_catalog_html()),
+                    httpx.Response(200, text=_catalog_html(("1", "Produto", False))),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        scanner.scan_catalog(watch)
+        scanner.scan_catalog(watch)
+        outcome = scanner.scan_catalog(watch)
+
+        assert notifier.catalog_updates == []
+        assert outcome.catalog_changes == 0
+        assert len(_catalog_rows(conn)) == 1
+    finally:
+        conn.close()
+
+
+def test_catalog_seeded_on_an_empty_page_still_alerts_on_the_first_product() -> None:
+    # The watched pre-sale page is empty between drops. Seeding must key on the
+    # watch, not on stored rows, or the first product listed after an empty seed
+    # would be swallowed as another silent seed.
+    conn = _conn()
+    try:
+        watch = _watch()
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_catalog_html()),
+                    httpx.Response(200, text=_catalog_html()),
+                    httpx.Response(200, text=_catalog_html(("1", "Nova pré-venda", False))),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        scanner.scan_catalog(watch)  # seed on an empty page
+        scanner.scan_catalog(watch)  # still empty
+        outcome = scanner.scan_catalog(watch)
+
+        assert outcome.catalog_changes == 1
+        assert len(notifier.catalog_updates) == 1
+        (change,) = notifier.catalog_updates[0]["changes"]
+        assert (change.kind, change.product.name) == (CHANGE_NEW, "Nova pré-venda")
+        assert _catalog_rows(conn)[0]["in_stock"] == 0
+    finally:
+        conn.close()
+
+
+def test_catalog_cycle_stop_stops_the_whole_cycle() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        card = _card("gengar")
+        handler = RouteHandler(
+            {
+                watch.url: [httpx.Response(429)],
+                card.url: [httpx.Response(200, text=GENGAR_HTML)],
+            }
+        )
+        notifier = SpyCatalogNotifier()
+        scanner = _scanner(conn, handler, notifier)
+
+        summary = scanner.run([watch, card])
+
+        assert [row["error_type"] for row in _scan_errors(conn)] == ["http_429"]
+        assert card.url not in handler.requests
+        assert summary.stopped_early is True
+    finally:
+        conn.close()
+
+
+def test_catalog_fetch_failure_logs_and_cycle_continues() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        card = _card("gengar")
+        handler = RouteHandler(
+            {
+                watch.url: [httpx.Response(500), httpx.Response(500)],
+                card.url: [httpx.Response(200, text=GENGAR_HTML)],
+            }
+        )
+        notifier = SpyCatalogNotifier()
+        scanner = _scanner(conn, handler, notifier, [])
+
+        summary = scanner.run([watch, card])
+
+        assert [row["error_type"] for row in _scan_errors(conn)] == ["fetch"]
+        assert notifier.catalog_updates == []
+        assert storage.get_baseline(conn, card.card_id, "NM").lowest_price == 2670.0
+        assert summary.cards_failed == 1
+        assert summary.cards_scanned == 1
+    finally:
+        conn.close()
+
+
+def test_catalog_url_without_a_parser_records_a_parse_error() -> None:
+    conn = _conn()
+    try:
+        watch = _watch(url="https://unknown-store.example/colecao/")
+        notifier = SpyCatalogNotifier()
+        scanner = _scanner(conn, RouteHandler({}), notifier)
+
+        outcome = scanner.scan_catalog(watch)
+
+        assert outcome.error_type == "parse"
+        assert [row["error_message"] for row in _scan_errors(conn)] == ["no parser for url"]
+        assert notifier.catalog_updates == []
+    finally:
+        conn.close()
+
+
+def test_mixed_price_sealed_and_catalog_run_processes_all_three() -> None:
+    conn = _conn()
+    try:
+        card = _card("gengar")
+        sealed = _sealed_card("etb")
+        watch = _watch()
+        sealed_html = _sealed_prod_html([{"qualid": "1", "precoFinal": "100.00"}])
+        handler = RouteHandler(
+            {
+                card.url: [httpx.Response(200, text=GENGAR_HTML)],
+                sealed.url: [httpx.Response(200, text=sealed_html)],
+                watch.url: [httpx.Response(200, text=PRE_VENDA_HTML)],
+            }
+        )
+        sleeps: list[float] = []
+        notifier = SpyCatalogNotifier()
+        scanner = _scanner(conn, handler, notifier, sleeps)
+
+        summary = scanner.run([card, sealed, watch])
+
+        assert storage.get_baseline(conn, card.card_id, "NM").lowest_price == 2670.0
+        assert storage.get_baseline(conn, sealed.card_id, "SEALED").lowest_price == 100.0
+        assert len(_catalog_rows(conn)) == 1
+        assert len(handler.requests) == 3  # one page request per entry
+        assert sleeps == [30, 30]
+        assert summary.cards_scanned == 3
+        assert summary.cards_failed == 0
+        assert summary.catalog_updates == 0
+    finally:
+        conn.close()
+
+
+def test_catalog_updates_are_counted_in_the_run_summary() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_catalog_html(("1", "Produto", True))),
+                    httpx.Response(
+                        200, text=_catalog_html(("1", "Produto", True), ("2", "Novo", True))
+                    ),
+                ]
+            }
+        )
+        notifier = SpyCatalogNotifier()
+        scanner = _scanner(conn, handler, notifier)
+
+        scanner.run([watch])
+        summary = scanner.run([watch])
+
+        assert summary.catalog_updates == 1
+        assert len(notifier.catalog_updates) == 1
+    finally:
+        conn.close()
+
+
+def test_real_discord_notifier_sends_one_catalog_message() -> None:
+    conn = _conn()
+    try:
+        watch = _watch()
+        page_handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_catalog_html(("1", "Produto", True))),
+                    httpx.Response(
+                        200, text=_catalog_html(("1", "Produto", True), ("2", "Novo", False))
+                    ),
+                ]
+            }
+        )
+        posted: list[httpx.Request] = []
+
+        def discord_handler(request: httpx.Request) -> httpx.Response:
+            posted.append(request)
+            return httpx.Response(204)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            client=_client(discord_handler),
+        )
+        scanner = Scanner(
+            fetcher=_fetcher(page_handler, []),
+            notifier=notifier,
+            conn=conn,
+            clock=lambda: FIXED_NOW,
+        )
+
+        scanner.scan_catalog(watch)
+        scanner.scan_catalog(watch)
+
+        assert len(posted) == 1
+        assert json.loads(posted[0].content.decode("utf-8")) == {
+            "content": (
+                "🆕 Shisui Pré-venda — 1 update(s)\n"
+                "• NEW: Novo - R$99,99 - Esgotado - https://shisuistore.com.br/produtos/2/"
+            )
+        }
     finally:
         conn.close()
