@@ -76,6 +76,11 @@ New-Product Watch). A missing or unknown `type` aborts startup.
     "name": "Shisui Pré-venda",
     "type": "new_product",
     "url": "https://www.shisuistore.com.br/pre-venda/"
+  },
+  {
+    "name": "Fourse — 30 Anos de Pokémon",
+    "type": "new_product",
+    "url": "https://fourse.com.br/block/celebrating-30-years-of-pokemon/"
   }
 ]
 ```
@@ -89,7 +94,7 @@ New-Product Watch). A missing or unknown `type` aborts startup.
   **newly listed** or **restocked** (sold-out → in-stock), never on price moves (FRD §21).
   `conditions` is unused. Only page 1 is fetched (one request per watch), the first scan
   seeds silently, and all changes from one scan arrive in a single Discord message.
-  Supported store: Shisui Store (Nuvemshop).
+  Supported stores: Shisui Store (Nuvemshop) and Fourse (WooCommerce).
 - Unknown JSON keys are ignored for forward compatibility.
 
 ## Run

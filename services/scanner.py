@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from models.card import Card
 from models.price_result import PriceResult
 from parsers.base import CatalogParser, MarketplaceParser
+from parsers.fourse import FourseParser
 from parsers.ligapokemon_parser import LigaPokemonParser, SpriteErrorHandler, SpriteFetcher
 from parsers.nuvemshop import NuvemshopParser
 from services import storage
@@ -33,7 +34,10 @@ DEFAULT_PARSERS: tuple[ParserFactory, ...] = (
 
 # Catalog parsers need neither a sprite fetcher nor a sprite-error handler
 # (FRD §21), so they are a separate factory list rather than a widened one.
-DEFAULT_CATALOG_PARSERS: tuple[CatalogParserFactory, ...] = (NuvemshopParser,)
+DEFAULT_CATALOG_PARSERS: tuple[CatalogParserFactory, ...] = (
+    NuvemshopParser,
+    FourseParser,
+)
 
 
 @dataclass(slots=True, frozen=True)

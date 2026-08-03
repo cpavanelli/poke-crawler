@@ -807,6 +807,11 @@ PRE_VENDA_HTML = (
     Path(__file__).parent / "fixtures" / "shisui" / "pre_venda.html"
 ).read_text(encoding="utf-8")
 PRE_VENDA_ID = "357460215"
+FOURSE_URL = "https://fourse.com.br/block/celebrating-30-years-of-pokemon/"
+FOURSE_HTML = (
+    Path(__file__).parent / "fixtures" / "fourse" / "block_30_years.html"
+).read_text(encoding="utf-8")
+FOURSE_PRODUCT_ID = "17960"
 
 
 def _watch(name: str = "Shisui Pré-venda", url: str = SHISUI_URL) -> Card:
@@ -835,6 +840,34 @@ def _catalog_html(*products: tuple[str, str, bool]) -> str:
     return f"<html><body>{''.join(blocks)}</body></html>"
 
 
+def _fourse_catalog_html(*products: tuple[str, str, bool]) -> str:
+    """Minimal Fourse-shaped page from (product_id, name, in_stock) triples."""
+    blocks = []
+    for product_id, name, in_stock in products:
+        stock_class = "instock" if in_stock else "outofstock"
+        blocks.append(
+            f"""
+            <li class="product type-product post-{product_id} {stock_class}">
+              <a class="woocommerce-loop-product__link"
+                 href="https://fourse.com.br/item/{product_id}/"></a>
+              <h2 class="woocommerce-loop-product__title">
+                <a href="https://fourse.com.br/item/{product_id}/">{name}</a>
+              </h2>
+              <span class="price">
+                <span class="woocommerce-Price-amount"><bdi>R$ 99,99</bdi></span>
+                <span class="em-price-unit">/ UN</span>
+              </span>
+              <a data-product_id="{product_id}"></a>
+            </li>
+            """
+        )
+    return (
+        '<html><body><div id="ecomus-shop-content"><ul class="products">'
+        f"{''.join(blocks)}"
+        "</ul></div></body></html>"
+    )
+
+
 def _catalog_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         """
@@ -853,6 +886,82 @@ class SpyCatalogNotifier(SpyNotifier):
     def notify_catalog_updates(self, *, watch_name: str, changes: object) -> bool:
         self.catalog_updates.append({"watch_name": watch_name, "changes": list(changes)})
         return True
+
+
+def test_catalog_parsers_dispatch_fourse_and_shisui_in_the_same_run() -> None:
+    conn = _conn()
+    try:
+        fourse_watch = _watch(name="Fourse — 30 Anos de Pokémon", url=FOURSE_URL)
+        shisui_watch = _watch()
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                fourse_watch.url: [httpx.Response(200, text=FOURSE_HTML)],
+                shisui_watch.url: [httpx.Response(200, text=PRE_VENDA_HTML)],
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        summary = scanner.run([fourse_watch, shisui_watch])
+
+        rows = {
+            (row["watch_id"], row["product_id"])
+            for row in _catalog_rows(conn)
+        }
+        assert rows == {
+            (fourse_watch.card_id, FOURSE_PRODUCT_ID),
+            (shisui_watch.card_id, PRE_VENDA_ID),
+        }
+        assert summary.cards_scanned == 2
+        assert summary.cards_failed == 0
+        assert notifier.catalog_updates == []
+    finally:
+        conn.close()
+
+
+def test_fourse_new_product_alert_is_batched_and_shisui_is_unaffected() -> None:
+    conn = _conn()
+    try:
+        fourse_watch = _watch(name="Fourse — 30 Anos de Pokémon", url=FOURSE_URL)
+        shisui_watch = _watch()
+        first_fourse = _fourse_catalog_html((FOURSE_PRODUCT_ID, "Box Coleção", True))
+        second_fourse = _fourse_catalog_html(
+            (FOURSE_PRODUCT_ID, "Box Coleção", True),
+            ("999", "Nova caixa Pokémon", True),
+        )
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                fourse_watch.url: [
+                    httpx.Response(200, text=first_fourse),
+                    httpx.Response(200, text=second_fourse),
+                ],
+                shisui_watch.url: [httpx.Response(200, text=PRE_VENDA_HTML)] * 2,
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        first_summary = scanner.run([fourse_watch, shisui_watch])
+        second_summary = scanner.run([fourse_watch, shisui_watch])
+
+        assert first_summary.catalog_updates == 0
+        assert second_summary.catalog_updates == 1
+        assert len(notifier.catalog_updates) == 1
+        call = notifier.catalog_updates[0]
+        assert call["watch_name"] == "Fourse — 30 Anos de Pokémon"
+        assert [
+            (change.kind, change.product.product_id) for change in call["changes"]
+        ] == [(CHANGE_NEW, "999")]
+        shisui_rows = [
+            row
+            for row in _catalog_rows(conn)
+            if row["watch_id"] == shisui_watch.card_id
+        ]
+        assert [(row["product_id"], row["in_stock"]) for row in shisui_rows] == [
+            (PRE_VENDA_ID, 0)
+        ]
+    finally:
+        conn.close()
 
 
 def test_catalog_first_scan_seeds_silently() -> None:

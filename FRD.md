@@ -590,6 +590,7 @@ Version 1:
 
 - LigaPokemonParser (price watch)
 - NuvemshopParser (catalog watch — Shisui Store)
+- FourseParser (catalog watch — Fourse, WooCommerce)
 
 Future:
 
@@ -835,7 +836,21 @@ For Nuvemshop / Tiendanube each product is a `div.js-item-product` element:
 | `name` | `.js-item-name` text |
 | `url` | product `/produtos/<slug>/` link |
 | `price` | `.js-price-display` / `data-store="product-item-price-…"` |
-| `in_stock` | absence of the `noStock` / "Esgotado" out-of-stock markers |
+| `in_stock` | per-product `ld+json` `offers.availability` (fallback: `data-variants` JSON) |
+
+For Fourse / WooCommerce each product is a `li.product` inside the
+`#ecomus-shop-content` grid:
+
+| Field | Source |
+|---|---|
+| `product_id` | `post-<ID>` token in the `li` class list (fallback: `data-product_id` on the add-to-cart button) |
+| `name` | `h2.woocommerce-loop-product__title a` text |
+| `url` | `a.woocommerce-loop-product__link[href]` |
+| `price` | `span.price ins .woocommerce-Price-amount bdi`, else `span.price > .woocommerce-Price-amount bdi` |
+| `in_stock` | `instock` / `outofstock` token in the `li` class list |
+
+Fourse exposes no `ld+json`; stock comes from the first-class WooCommerce
+`instock` / `outofstock` class token.
 
 ## Product Identity
 
