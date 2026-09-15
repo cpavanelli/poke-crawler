@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from models.card import Card
 from models.price_result import PriceResult
+from parsers.amazon import AmazonParser
 from parsers.base import CatalogParser, MarketplaceParser
 from parsers.fourse import FourseParser
 from parsers.ligapokemon_parser import LigaPokemonParser, SpriteErrorHandler, SpriteFetcher
@@ -37,6 +38,7 @@ DEFAULT_PARSERS: tuple[ParserFactory, ...] = (
 DEFAULT_CATALOG_PARSERS: tuple[CatalogParserFactory, ...] = (
     NuvemshopParser,
     FourseParser,
+    AmazonParser,
 )
 
 

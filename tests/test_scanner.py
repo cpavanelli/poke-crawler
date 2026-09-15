@@ -13,7 +13,7 @@ from models.card import TYPE_NEW_PRODUCT, Card
 from services import storage
 from services.catalog import CHANGE_NEW, CHANGE_RESTOCK
 from services.fetcher import RETRY_DELAY_SECONDS, HttpFetcher
-from services.notifier import DiscordNotifier
+from services.notifier import DiscordNotifier, format_catalog_updates
 from services.scanner import Scanner
 
 
@@ -1300,5 +1300,136 @@ def test_real_discord_notifier_sends_one_catalog_message() -> None:
                 "• NEW: Novo - R$99,99 - Esgotado - https://shisuistore.com.br/produtos/2/"
             )
         }
+    finally:
+        conn.close()
+
+
+# --- Amazon availability watch (issue #18) --------------------------------
+
+AMAZON_URL = "https://www.amazon.com.br/dp/B0TEST0001"
+AMAZON_ASIN = "B0TEST0001"
+AMAZON_WATCH_NAME = "Amazon — 30th ETB (Inglês)"
+
+
+def _amazon_html(*, in_stock: bool | None) -> str:
+    """Minimal Amazon product page; in_stock=None renders a robot-check page."""
+    if in_stock is None:
+        return '<html><body><form action="/errors/validateCaptcha"></form></body></html>'
+    buybox = (
+        '<div id="corePrice_feature_div"><span class="a-offscreen">R$449,90</span></div>'
+        '<input id="add-to-cart-button" type="submit"/>'
+        if in_stock
+        else '<div id="outOfStock">Não disponível.</div>'
+    )
+    return f"""
+        <html><body>
+          <span id="productTitle">Pokémon TCG: 30th Elite Trainer Box - Inglês</span>
+          <input type="hidden" id="ASIN" value="{AMAZON_ASIN}"/>
+          <div id="desktop_buybox">{buybox}</div>
+        </body></html>
+    """
+
+
+def test_amazon_watch_seeds_silently_then_alerts_restock_exactly_once() -> None:
+    conn = _conn()
+    try:
+        watch = _watch(name=AMAZON_WATCH_NAME, url=AMAZON_URL)
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_amazon_html(in_stock=False)),
+                    httpx.Response(200, text=_amazon_html(in_stock=True)),
+                    httpx.Response(200, text=_amazon_html(in_stock=True)),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        scanner.scan_catalog(watch)
+
+        assert notifier.catalog_updates == []
+        assert [
+            (row["product_id"], row["in_stock"], row["price"]) for row in _catalog_rows(conn)
+        ] == [(AMAZON_ASIN, 0, None)]
+
+        scanner.scan_catalog(watch)
+
+        assert len(notifier.catalog_updates) == 1
+        call = notifier.catalog_updates[0]
+        assert call["watch_name"] == AMAZON_WATCH_NAME
+        assert [
+            (change.kind, change.product.product_id, change.product.url, change.product.price)
+            for change in call["changes"]
+        ] == [(CHANGE_RESTOCK, AMAZON_ASIN, AMAZON_URL, 449.90)]
+        content = format_catalog_updates(watch_name=AMAZON_WATCH_NAME, changes=call["changes"])
+        assert "RESTOCK:" in content
+        assert "Pokémon TCG: 30th Elite Trainer Box - Inglês" in content
+        assert AMAZON_URL in content
+
+        scanner.scan_catalog(watch)
+
+        assert len(notifier.catalog_updates) == 1
+        assert _count(conn, "scan_errors") == 0
+    finally:
+        conn.close()
+
+
+def test_amazon_robot_check_never_seeds_the_watch() -> None:
+    conn = _conn()
+    try:
+        watch = _watch(name=AMAZON_WATCH_NAME, url=AMAZON_URL)
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(200, text=_amazon_html(in_stock=None)),
+                    httpx.Response(200, text=_amazon_html(in_stock=False)),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        blocked = scanner.scan_catalog(watch)
+
+        assert blocked.error_type == "parse"
+        errors = conn.execute("SELECT error_type, error_message FROM scan_errors").fetchall()
+        assert [(row[0], row[1]) for row in errors] == [("parse", "amazon robot check page")]
+        assert _count(conn, "catalog_watches") == 0
+        assert _catalog_rows(conn) == []
+
+        seeded = scanner.scan_catalog(watch)
+
+        assert seeded.error_type is None
+        assert notifier.catalog_updates == []  # no false NEW after the block
+        assert [row["product_id"] for row in _catalog_rows(conn)] == [AMAZON_ASIN]
+    finally:
+        conn.close()
+
+
+def test_catalog_parsers_dispatch_amazon_and_fourse_in_the_same_run() -> None:
+    conn = _conn()
+    try:
+        amazon_watch = _watch(name=AMAZON_WATCH_NAME, url=AMAZON_URL)
+        fourse_watch = _watch(name="Fourse — 30 Anos de Pokémon", url=FOURSE_URL)
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                amazon_watch.url: [httpx.Response(200, text=_amazon_html(in_stock=False))],
+                fourse_watch.url: [httpx.Response(200, text=FOURSE_HTML)],
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        summary = scanner.run([amazon_watch, fourse_watch])
+
+        rows = {(row["watch_id"], row["product_id"]) for row in _catalog_rows(conn)}
+        assert rows == {
+            (amazon_watch.card_id, AMAZON_ASIN),
+            (fourse_watch.card_id, FOURSE_PRODUCT_ID),
+        }
+        assert summary.cards_scanned == 2
+        assert summary.cards_failed == 0
+        assert notifier.catalog_updates == []
     finally:
         conn.close()

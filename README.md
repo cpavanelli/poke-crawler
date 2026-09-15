@@ -94,7 +94,12 @@ New-Product Watch). A missing or unknown `type` aborts startup.
   **newly listed** or **restocked** (sold-out → in-stock), never on price moves (FRD §21).
   `conditions` is unused. Only page 1 is fetched (one request per watch), the first scan
   seeds silently, and all changes from one scan arrive in a single Discord message.
-  Supported stores: Shisui Store (Nuvemshop) and Fourse (WooCommerce).
+  Supported stores: Shisui Store (Nuvemshop), Fourse (WooCommerce), and Amazon Brasil product pages.
+  Amazon: one product per entry, using the clean `https://www.amazon.com.br/dp/<ASIN>`
+  URL (drop wish-list tracking parameters; the watch identity is the URL hash). The
+  product counts as available when it has any offer, third-party sellers included,
+  and the alert arrives as `RESTOCK`. Availability reflects Amazon's default delivery
+  address; robot-check pages are logged as scan errors and never bypassed.
 - Unknown JSON keys are ignored for forward compatibility.
 
 ## Run

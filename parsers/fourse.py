@@ -28,6 +28,7 @@ from bs4.element import Tag
 
 from models.product import Product
 from parsers.base import CatalogParser
+from parsers.money import parse_brl
 
 logger = logging.getLogger(__name__)
 
@@ -154,20 +155,10 @@ def _parse_price(block: Tag) -> float | None:
             amount_el = price_el.select_one(".woocommerce-Price-amount bdi")
 
     raw = amount_el.get_text() if amount_el is not None else ""
-    price = _parse_brl(raw)
+    price = parse_brl(raw)
     if price is None:
         logger.warning("Fourse price %r is not readable BRL; treated as unknown", raw)
     return price
-
-
-def _parse_brl(raw: str) -> float | None:
-    """Parse Brazilian currency text such as ``R$ 1.234,56``."""
-    normalized = "".join(raw.replace("R$", "").replace("\xa0", " ").split())
-    normalized = normalized.replace(".", "").replace(",", ".")
-    try:
-        return float(normalized)
-    except ValueError:
-        return None
 
 
 def _parse_stock(block: Tag) -> bool | None:

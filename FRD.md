@@ -591,6 +591,7 @@ Version 1:
 - LigaPokemonParser (price watch)
 - NuvemshopParser (catalog watch — Shisui Store)
 - FourseParser (catalog watch — Fourse, WooCommerce)
+- AmazonParser (catalog watch — Amazon Brasil single-product availability)
 
 Future:
 
@@ -852,6 +853,25 @@ For Fourse / WooCommerce each product is a `li.product` inside the
 Fourse exposes no `ld+json`; stock comes from the first-class WooCommerce
 `instock` / `outofstock` class token.
 
+For Amazon Brasil (`amazon.com.br`) a single **product page** (`/dp/<ASIN>` or
+`/gp/product/<ASIN>`) is parsed as a catalog holding exactly one product, so the
+availability alert is the standard `RESTOCK` (sold-out → available):
+
+| Field | Source |
+|---|---|
+| `product_id` | `input#ASIN` value (fallback: `/dp/<ASIN>` in the canonical link) |
+| `name` | `#productTitle` text, whitespace-collapsed |
+| `url` | built as `https://www.amazon.com.br/dp/<ASIN>` (tracking parameters dropped) |
+| `price` | `#desktop_buybox #corePrice_feature_div .a-offscreen`, else `#aod-ingress-link .a-offscreen`, else none |
+| `in_stock` | any offer: `#add-to-cart-button` or `#buybox-see-all-buying-choices` inside `#desktop_buybox`, or `#aod-ingress-link`; otherwise sold out when `#outOfStock` is inside the buy box |
+
+Stock is never read from `#availability` text, which Amazon omits for some
+User-Agents, and third-party offers count as available. Because the page holds
+one product, an unrecognised page (a robot check, a missing ASIN or title, or a
+buy box with none of the signals above) raises a parse error instead of
+degrading to sold out, so it never seeds or changes the watch. Robot checks are
+never bypassed.
+
 ## Product Identity
 
 A product is identified by `product_id` (the store's numeric ID). Name, URL, and
@@ -902,7 +922,8 @@ The catalog watch is a distinct parser capability (§11): catalog parsers implem
 `can_handle(url)` + `parse_catalog(html) -> list[Product]`, and the set-difference
 reduction is the marketplace-agnostic pure function
 `detect_changes(current, known) -> list[Change]`. The **NuvemshopParser**
-implements the contract for Shisui Store.
+implements the contract for Shisui Store, the **FourseParser** for Fourse, and
+the **AmazonParser** for Amazon Brasil product pages.
 
 ## Error Handling & Anti-Abuse
 

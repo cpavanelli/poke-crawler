@@ -12,21 +12,6 @@
     "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mew%20ex%20(232/091)&ed=PAF&num=232"
   },
   {
-    "name": "ETB - Ascended Heroes",
-    "type": "price",
-    "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=135115&prod=Elite-Trainer-Box---Mega-Evolution---Ascended-Heroes"
-  },
-  {
-    "name": "ETB - Phantasmal Flames",
-    "type": "price",
-    "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=134380&prod=%28ING%29+Elite+Trainer+Box+-+Megaevolution+Series+-+Phantasmal+Flames"
-  },
-  {
-    "name": "ETB - Mega Dream ex",
-    "type": "price",
-    "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=134848&prod=%28JAP%29+Booster+Box+-+Mega+Dream+ex"
-  },
-  {
     "name": "ETB - 30th Celebration",
     "type": "price",
     "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=136962&prod=%28ING%29+Elite+Trainer+Box+-+30th+Celebration"
@@ -37,13 +22,8 @@
     "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=136986&prod=%28PT-BR%29+Elite+Trainer+Box+-+30th+Celebration"
   },
   {
-    "name": "Shisui Pré-venda",
+    "name": "Amazon — 30th ETB (Inglês)",
     "type": "new_product",
-    "url": "https://www.shisuistore.com.br/pre-venda/"
-  },
-  {
-    "name": "Fourse — 30 Anos de Pokémon",
-    "type": "new_product",
-    "url": "https://fourse.com.br/block/celebrating-30-years-of-pokemon/"
+    "url": "https://www.amazon.com.br/dp/B0H78BB9TY"
   }
 ]

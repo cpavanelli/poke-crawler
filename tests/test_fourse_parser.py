@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from parsers.fourse import FourseParser, _parse_brl
+from parsers.fourse import FourseParser
 from parsers.nuvemshop import NuvemshopParser
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "fourse"
@@ -163,10 +163,6 @@ def test_installment_pix_and_unit_suffix_are_not_parsed_as_the_price() -> None:
 
     assert product.price == 299.99
     assert product.price not in {25.0, 94.99}
-
-
-def test_parse_brl_handles_thousands_separator_and_nbsp() -> None:
-    assert _parse_brl("R$\xa01.234,56") == 1234.56
 
 
 def test_outofstock_is_not_misread_as_instock() -> None:
