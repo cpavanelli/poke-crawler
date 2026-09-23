@@ -13,12 +13,26 @@ from services.config import AppConfig
 MAX_ATTEMPTS = 2
 RETRY_DELAY_SECONDS = 5
 STOP_STATUSES = frozenset({403, 429})
+NOT_FOUND_STATUS = 404
 
 logger = logging.getLogger(__name__)
 
 
 class FetchError(Exception):
     """Transient fetch failure that exhausted the retry budget (FRD §12, §13)."""
+
+
+class PageNotFound(FetchError):
+    """HTTP 404 for a watched URL: the page does not exist (yet).
+
+    Not a transient failure, so it is never retried (FRD §13). A product page
+    that has not been published yet answers 404 until it goes live, and a
+    catalog watch treats that as an empty page rather than an error (FRD §21).
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        super().__init__(f"HTTP {NOT_FOUND_STATUS} from {url}")
 
 
 class CycleStop(Exception):
@@ -50,7 +64,11 @@ class HttpFetcher:
         self._timeout_seconds = timeout_seconds
         self._request_delay_seconds = request_delay_seconds
         self._sprite_request_delay_seconds = sprite_request_delay_seconds
-        self._client = client or httpx.Client(timeout=httpx.Timeout(timeout_seconds))
+        # Redirects are followed so a store's "product not published" redirect
+        # resolves to the real 404 instead of an empty 3xx body (FRD §13).
+        self._client = client or httpx.Client(
+            timeout=httpx.Timeout(timeout_seconds), follow_redirects=True
+        )
         self._sleep = sleep
 
     @classmethod
@@ -107,10 +125,12 @@ class HttpFetcher:
                 )
                 if response.status_code in STOP_STATUSES:
                     raise CycleStop(response.status_code, url)
+                if response.status_code == NOT_FOUND_STATUS:
+                    raise PageNotFound(url)
                 if response.is_error:
                     response.raise_for_status()
                 return response
-            except CycleStop:
+            except (CycleStop, PageNotFound):
                 raise
             except (
                 httpx.TimeoutException,

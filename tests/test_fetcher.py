@@ -15,6 +15,7 @@ from services.fetcher import (
     CycleStop,
     FetchError,
     HttpFetcher,
+    PageNotFound,
 )
 
 
@@ -227,3 +228,59 @@ def test_context_manager_closes_client() -> None:
 
     fetcher.close()
     assert client.is_closed
+
+
+def test_get_page_404_raises_page_not_found_without_retry() -> None:
+    # A missing page is not transient (FRD §13): a product page that has not
+    # been published yet answers 404 on every scan until it goes live.
+    url = "https://www.copagloja.com.br/box-colecao-com-poster-/p"
+    handler = QueueHandler([httpx.Response(404)])
+    sleeps: list[float] = []
+    fetcher = _fetcher(handler, sleeps)
+
+    with pytest.raises(PageNotFound) as exc_info:
+        fetcher.get_page(url)
+
+    assert exc_info.value.url == url
+    assert isinstance(exc_info.value, FetchError)
+    assert len(handler.requests) == 1
+    assert sleeps == []
+
+
+def test_default_client_follows_redirects() -> None:
+    # Copag redirects an unpublished product to /Sistema/404, so the redirect
+    # has to be followed for the real 404 to surface.
+    fetcher = HttpFetcher(
+        user_agent="TestAgent/1.0",
+        timeout_seconds=12,
+        request_delay_seconds=30,
+        sprite_request_delay_seconds=2,
+    )
+
+    try:
+        assert fetcher._client.follow_redirects is True
+    finally:
+        fetcher.close()
+
+
+def test_redirect_to_a_missing_page_raises_page_not_found() -> None:
+    target = "https://www.copagloja.com.br/Sistema/404?ProductLinkNotFound=box"
+    handler = QueueHandler(
+        [
+            httpx.Response(301, headers={"Location": target}),
+            httpx.Response(404, text="<html>Sistema</html>"),
+        ]
+    )
+    sleeps: list[float] = []
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(12),
+        follow_redirects=True,
+    )
+    fetcher = _fetcher(handler, sleeps, client=client)
+
+    with pytest.raises(PageNotFound):
+        fetcher.get_page("https://www.copagloja.com.br/box-colecao-com-poster-/p")
+
+    assert len(handler.requests) == 2
+    assert sleeps == []

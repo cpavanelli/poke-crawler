@@ -592,6 +592,7 @@ Version 1:
 - NuvemshopParser (catalog watch — Shisui Store)
 - FourseParser (catalog watch — Fourse, WooCommerce)
 - AmazonParser (catalog watch — Amazon Brasil single-product availability)
+- CopagParser (catalog watch — Copag Loja, VTEX single-product availability)
 
 Future:
 
@@ -612,6 +613,7 @@ Supported scenarios:
 - No matching condition
 - HTTP 403
 - HTTP 429
+- HTTP 404 (page missing / product not published yet)
 
 Behavior:
 
@@ -619,6 +621,7 @@ Behavior:
 |---------|---------|
 | Timeout | Log and continue |
 | Parser failure | Log and continue |
+| 404 | Not retried; log to scan_errors with `error_type = not_found` and continue. A catalog watch treats the page as empty (§21) |
 | Sprite decode failure | Skip listing, log to scan_errors, send Discord alert, continue |
 | Invalid config | Abort startup |
 | Discord failure | Log and continue |
@@ -646,6 +649,12 @@ Attempt 1
 → Attempt 2
 → Failure
 → Log error
+
+Only *transient* failures are retried. HTTP 404 is not transient, so it is never
+retried: the page is missing, and a watched product page answers 404 every scan
+until the store publishes it. Redirects are followed, so a store's
+"product not found" redirect resolves to the real 404 rather than an empty 3xx
+body.
 
 ---
 
@@ -872,6 +881,23 @@ buy box with none of the signals above) raises a parse error instead of
 degrading to sold out, so it never seeds or changes the watch. Robot checks are
 never bypassed.
 
+For Copag Loja (`copagloja.com.br`, legacy VTEX) a single **product page**
+(`/<slug>/p`) is likewise parsed as a catalog holding exactly one product:
+
+| Field | Source |
+|---|---|
+| `product_id` | `productId` in the inline `var skuJson_0 = {…}` object (fallback: microdata `productID`) |
+| `name` | `skuJson_0.name`, whitespace-collapsed (fallback: microdata `name`) |
+| `url` | microdata `url` (fallbacks: canonical link, `og:url`) — tracking parameters dropped |
+| `price` | lowest `bestPrice` (cents) among **available** SKUs, else microdata `price`; none when sold out |
+| `in_stock` | any SKU with `available: true`, else `skuJson_0.available`, else microdata `offers.availability` |
+
+A sold-out VTEX SKU still carries a price, but a placeholder one
+(`R$ 9.999.876,00`, `bestPrice` 999987600), so a price is only ever read from an
+available SKU. As for Amazon, an unrecognised page (neither `skuJson_0` nor a
+microdata availability, or a missing id or name) raises a parse error rather
+than degrading to sold out.
+
 ## Product Identity
 
 A product is identified by `product_id` (the store's numeric ID). Name, URL, and
@@ -887,6 +913,10 @@ watch itself is identified by `watch_id = SHA256(url)` (same formula as `card_id
 - **Restock** — a known product transitioning **sold-out → in-stock**.
 - **No alert** for: in-stock → sold-out, price changes, or a product disappearing
   from the page.
+- **Unpublished page** — a watched URL answering HTTP 404 is treated as an empty
+  page, not an error: the watch is seeded (or left unchanged) and the product is
+  reported as **new** the day the store publishes it. The 404 is still logged to
+  `scan_errors` as `not_found` each scan, so a mistyped URL stays visible.
 - **First scan** of a watch (no `catalog_watches` row for that `watch_id`):
   record every current product as the baseline with **no notifications** (silent
   seed), analogous to `SEND_INITIAL_BASELINE_NOTIFICATION=false`. A watch whose
@@ -922,8 +952,9 @@ The catalog watch is a distinct parser capability (§11): catalog parsers implem
 `can_handle(url)` + `parse_catalog(html) -> list[Product]`, and the set-difference
 reduction is the marketplace-agnostic pure function
 `detect_changes(current, known) -> list[Change]`. The **NuvemshopParser**
-implements the contract for Shisui Store, the **FourseParser** for Fourse, and
-the **AmazonParser** for Amazon Brasil product pages.
+implements the contract for Shisui Store, the **FourseParser** for Fourse, the
+**AmazonParser** for Amazon Brasil product pages, and the **CopagParser** for
+Copag Loja product pages.
 
 ## Error Handling & Anti-Abuse
 

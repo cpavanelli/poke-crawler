@@ -81,6 +81,11 @@ New-Product Watch). A missing or unknown `type` aborts startup.
     "name": "Fourse — 30 Anos de Pokémon",
     "type": "new_product",
     "url": "https://fourse.com.br/block/celebrating-30-years-of-pokemon/"
+  },
+  {
+    "name": "Copag — Treinador Avançado 30 Anos",
+    "type": "new_product",
+    "url": "https://www.copagloja.com.br/treinador-avancado-pokemon-30-anos/p"
   }
 ]
 ```
@@ -94,12 +99,19 @@ New-Product Watch). A missing or unknown `type` aborts startup.
   **newly listed** or **restocked** (sold-out → in-stock), never on price moves (FRD §21).
   `conditions` is unused. Only page 1 is fetched (one request per watch), the first scan
   seeds silently, and all changes from one scan arrive in a single Discord message.
-  Supported stores: Shisui Store (Nuvemshop), Fourse (WooCommerce), and Amazon Brasil product pages.
+  Supported stores: Shisui Store (Nuvemshop), Fourse (WooCommerce), Amazon Brasil product
+  pages, and Copag Loja product pages (`https://www.copagloja.com.br/<slug>/p`).
   Amazon: one product per entry, using the clean `https://www.amazon.com.br/dp/<ASIN>`
   URL (drop wish-list tracking parameters; the watch identity is the URL hash). The
   product counts as available when it has any offer, third-party sellers included,
   and the alert arrives as `RESTOCK`. Availability reflects Amazon's default delivery
   address; robot-check pages are logged as scan errors and never bypassed.
+  Copag: one product per entry as well, alerting as `RESTOCK` when it comes back in
+  stock. A sold-out Copag page shows a placeholder price, so no price is reported
+  until the product is actually available.
+  A URL for a product the store has not published yet (HTTP 404) is watched as an
+  empty page — it is never retried, it is logged to `scan_errors` as `not_found`
+  each scan, and you get a `NEW` alert the day the product goes live.
 - Unknown JSON keys are ignored for forward compatibility.
 
 ## Run

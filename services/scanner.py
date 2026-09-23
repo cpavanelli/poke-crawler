@@ -11,12 +11,13 @@ from models.card import Card
 from models.price_result import PriceResult
 from parsers.amazon import AmazonParser
 from parsers.base import CatalogParser, MarketplaceParser
+from parsers.copag import CopagParser
 from parsers.fourse import FourseParser
 from parsers.ligapokemon_parser import LigaPokemonParser, SpriteErrorHandler, SpriteFetcher
 from parsers.nuvemshop import NuvemshopParser
 from services import storage
 from services.catalog import detect_changes
-from services.fetcher import CycleStop, FetchError, HttpFetcher
+from services.fetcher import CycleStop, FetchError, HttpFetcher, PageNotFound
 from services.notifier import DiscordNotifier
 from services.pricing import lowest_prices, lowest_sealed_price
 from services.storage import local_now_iso
@@ -39,6 +40,7 @@ DEFAULT_CATALOG_PARSERS: tuple[CatalogParserFactory, ...] = (
     NuvemshopParser,
     FourseParser,
     AmazonParser,
+    CopagParser,
 )
 
 
@@ -162,6 +164,23 @@ class Scanner:
             html = self._fetcher.get_page(card.url)
         except CycleStop:
             raise
+        except PageNotFound as exc:
+            logger.warning("Page not found for %s: %s", card.name, exc)
+            storage.insert_scan_error(
+                self._conn,
+                card_id=card_id,
+                url=card.url,
+                error_type="not_found",
+                error_message=str(exc),
+                occurred_at=now,
+            )
+            return CardOutcome(
+                card_id=card_id,
+                results=(),
+                new_lows=(),
+                initial_baselines=(),
+                error_type="not_found",
+            )
         except FetchError as exc:
             logger.error("Fetch failed for %s: %s", card.name, exc)
             storage.insert_scan_error(
@@ -245,11 +264,26 @@ class Scanner:
         if parser is None:
             return _failed(watch_id, "parse")
 
+        html: str | None = None
         try:
             # Page 1 only: one request per watch, no pagination (FRD §21).
             html = self._fetcher.get_page(card.url)
         except CycleStop:
             raise
+        except PageNotFound as exc:
+            # A watched product page answers 404 until the store publishes it.
+            # Treating that as an empty page seeds the watch now, so the product
+            # is reported as new the day it appears (FRD §21). The row keeps a
+            # typo'd URL visible instead of silently watching nothing.
+            logger.warning("Page not found for %s; treated as empty: %s", card.name, exc)
+            storage.insert_scan_error(
+                self._conn,
+                card_id=watch_id,
+                url=card.url,
+                error_type="not_found",
+                error_message=str(exc),
+                occurred_at=now,
+            )
         except FetchError as exc:
             logger.error("Fetch failed for %s: %s", card.name, exc)
             storage.insert_scan_error(
@@ -263,7 +297,7 @@ class Scanner:
             return _failed(watch_id, "fetch")
 
         try:
-            products = parser.parse_catalog(html)
+            products = parser.parse_catalog(html) if html is not None else []
         except CycleStop:
             raise
         except Exception as exc:
