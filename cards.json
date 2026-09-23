@@ -1,17 +1,5 @@
 [
   {
-    "name": "Mega Gengar",
-    "type": "price",
-    "conditions": ["NM", "SP"],
-    "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mega+Gengar+ex%20(284/217)&show=1&ed=ASC&num=284"
-  },
-  {
-    "name": "Mew ex",
-    "type": "price",
-    "conditions": ["NM", "SP"],
-    "url": "https://www.ligapokemon.com.br/?view=cards/card&card=Mew%20ex%20(232/091)&ed=PAF&num=232"
-  },
-  {
     "name": "ETB - 30th Celebration",
     "type": "price",
     "url": "https://www.ligapokemon.com.br/?view=prod/view&pcode=136962&prod=%28ING%29+Elite+Trainer+Box+-+30th+Celebration"
@@ -25,5 +13,20 @@
     "name": "Amazon — 30th ETB (Inglês)",
     "type": "new_product",
     "url": "https://www.amazon.com.br/dp/B0H78BB9TY"
+  },
+  {
+    "name": "Copag — Treinador Avançado 30 Anos",
+    "type": "new_product",
+    "url": "https://www.copagloja.com.br/treinador-avancado-pokemon-30-anos/p"
+  },
+  {
+    "name": "Copag — Blister Triplo Lucario 30 Anos",
+    "type": "new_product",
+    "url": "https://www.copagloja.com.br/blister-triplo-lucario-/p"
+  },
+  {
+    "name": "Copag — Box Coleção com Pôster 30 Anos",
+    "type": "new_product",
+    "url": "https://www.copagloja.com.br/box-colecao-com-poster-/p"
   }
 ]

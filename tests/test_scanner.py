@@ -1433,3 +1433,87 @@ def test_catalog_parsers_dispatch_amazon_and_fourse_in_the_same_run() -> None:
         assert notifier.catalog_updates == []
     finally:
         conn.close()
+
+
+# --- Unpublished product pages (HTTP 404) --------------------------------
+
+COPAG_URL = "https://www.copagloja.com.br/treinador-avancado-pokemon-30-anos/p"
+COPAG_SOLD_OUT_HTML = (
+    Path(__file__).parent / "fixtures" / "copag" / "sold_out.html"
+).read_text(encoding="utf-8")
+COPAG_PRODUCT_ID = "2687"
+
+
+def test_catalog_404_seeds_an_empty_watch_without_retrying() -> None:
+    conn = _conn()
+    try:
+        watch = _watch(name="Copag — Box Coleção com Pôster", url=COPAG_URL)
+        notifier = SpyCatalogNotifier()
+        sleeps: list[float] = []
+        handler = RouteHandler({watch.url: [httpx.Response(404, text="")]})
+        scanner = _scanner(conn, handler, notifier, sleeps)
+
+        outcome = scanner.scan_catalog(watch)
+
+        # A 404 is not transient, so it is fetched once and never retried.
+        assert len(handler.requests) == 1
+        assert sleeps == []
+        assert storage.is_watch_seeded(conn, watch.card_id) is True
+        assert _catalog_rows(conn) == []
+        assert notifier.catalog_updates == []
+        assert outcome.error_type is None
+        (error,) = conn.execute("SELECT error_type, url FROM scan_errors").fetchall()
+        assert error["error_type"] == "not_found"
+        assert error["url"] == watch.url
+    finally:
+        conn.close()
+
+
+def test_product_published_after_a_404_is_reported_as_new() -> None:
+    conn = _conn()
+    try:
+        watch = _watch(name="Copag — Treinador Avançado", url=COPAG_URL)
+        notifier = SpyCatalogNotifier()
+        handler = RouteHandler(
+            {
+                watch.url: [
+                    httpx.Response(404, text=""),
+                    httpx.Response(200, text=COPAG_SOLD_OUT_HTML),
+                ]
+            }
+        )
+        scanner = _scanner(conn, handler, notifier)
+
+        scanner.scan_catalog(watch)
+        outcome = scanner.scan_catalog(watch)
+
+        assert outcome.catalog_changes == 1
+        (call,) = notifier.catalog_updates
+        assert [
+            (change.kind, change.product.product_id) for change in call["changes"]
+        ] == [(CHANGE_NEW, COPAG_PRODUCT_ID)]
+        assert [row["product_id"] for row in _catalog_rows(conn)] == [COPAG_PRODUCT_ID]
+    finally:
+        conn.close()
+
+
+def test_price_watch_404_is_recorded_without_retrying() -> None:
+    conn = _conn()
+    try:
+        card = _card()
+        notifier = SpyNotifier()
+        sleeps: list[float] = []
+        handler = RouteHandler({card.url: [httpx.Response(404, text="")]})
+        scanner = _scanner(conn, handler, notifier, sleeps)
+
+        outcome = scanner.scan_card(card)
+
+        assert len(handler.requests) == 1
+        assert sleeps == []
+        assert outcome.error_type == "not_found"
+        assert outcome.results == ()
+        (error,) = conn.execute("SELECT error_type FROM scan_errors").fetchall()
+        assert error["error_type"] == "not_found"
+        assert _count(conn, "scan_results") == 0
+    finally:
+        conn.close()
